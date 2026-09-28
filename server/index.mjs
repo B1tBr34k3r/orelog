@@ -16,128 +16,186 @@ const parseJson = JSONbig({ storeAsString: true })
 const app = express()
 
 app.use(express.json({ limit: '16kb' }))
+import sqlite3 from 'sqlite3'
+import { open } from 'sqlite'
 
-function emptyState() {
-  return { settings: null, snapshots: [], workerSnapshots: [], days: [] }
-}
-
-class FileStore {
-  async read() {
-    try {
-      const state = JSON.parse(await readFile(dataPath, 'utf8'))
-      state.workerSnapshots ||= []
-      return state
-    } catch (error) {
-      if (error.code === 'ENOENT') return emptyState()
-      throw error
-    }
+class SqliteStore {
+  async init() {
+    await mkdir(path.dirname(dataPath), { recursive: true })
+    this.db = await open({
+      filename: dataPath.replace('.json', '.db'),
+      driver: sqlite3.Database
+    })
+    
+    await this.db.exec(`
+      CREATE TABLE IF NOT EXISTS dashboard_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        address TEXT NOT NULL,
+        time_zone TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recorded_at TEXT NOT NULL,
+        cumulative_atomic TEXT NOT NULL,
+        pending_atomic TEXT NOT NULL,
+        paid_atomic TEXT NOT NULL,
+        total_hashes TEXT NOT NULL,
+        last_hash_seconds INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS snapshots_recorded_at_idx ON snapshots (recorded_at);
+      CREATE TABLE IF NOT EXISTS worker_snapshots (
+        recorded_at TEXT NOT NULL,
+        identifier TEXT NOT NULL,
+        cumulative_atomic TEXT NOT NULL,
+        PRIMARY KEY (recorded_at, identifier)
+      );
+      CREATE INDEX IF NOT EXISTS worker_snapshots_recorded_at_idx ON worker_snapshots (recorded_at);
+      CREATE TABLE IF NOT EXISTS daily_records (
+        day_key TEXT PRIMARY KEY,
+        earned_atomic TEXT NOT NULL DEFAULT '0',
+        sample_count INTEGER NOT NULL DEFAULT 0,
+        gap_count INTEGER NOT NULL DEFAULT 0,
+        first_at TEXT,
+        last_at TEXT,
+        finalized INTEGER NOT NULL DEFAULT 0
+      );
+    `)
   }
 
-  async write(state) {
-    await mkdir(path.dirname(dataPath), { recursive: true })
-    const temporaryPath = `${dataPath}.${randomUUID()}.tmp`
-    await writeFile(temporaryPath, JSON.stringify(state), 'utf8')
-    await rename(temporaryPath, dataPath)
+  mapSnapshot(row) {
+    if (!row) return null
+    return {
+      recordedAt: row.recorded_at,
+      cumulativeAtomic: row.cumulative_atomic,
+      pendingAtomic: row.pending_atomic,
+      paidAtomic: row.paid_atomic,
+      totalHashes: row.total_hashes,
+      lastHashSeconds: row.last_hash_seconds,
+    }
   }
 
   async getSettings() {
-    return (await this.read()).settings
+    const row = await this.db.get('SELECT address, time_zone FROM dashboard_settings WHERE id = 1')
+    return row ? { address: row.address, timeZone: row.time_zone } : null
   }
 
   async saveSettings(settings) {
-    const state = await this.read()
-    const reset = Boolean(state.settings && (
-      state.settings.address !== settings.address || state.settings.timeZone !== settings.timeZone
-    ))
-    state.settings = settings
-    if (reset) {
-      state.snapshots = []
-      state.workerSnapshots = []
-      state.days = []
+    const previous = await this.getSettings()
+    const reset = Boolean(previous && (previous.address !== settings.address || previous.timeZone !== settings.timeZone))
+    
+    await this.db.run('BEGIN TRANSACTION')
+    try {
+      await this.db.run(
+        'INSERT INTO dashboard_settings (id, address, time_zone) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET address = excluded.address, time_zone = excluded.time_zone',
+        [settings.address, settings.timeZone]
+      )
+      if (reset) {
+        await this.db.run('DELETE FROM snapshots')
+        await this.db.run('DELETE FROM sqlite_sequence WHERE name="snapshots"')
+        await this.db.run('DELETE FROM worker_snapshots')
+        await this.db.run('DELETE FROM daily_records')
+      }
+      await this.db.run('COMMIT')
+    } catch (e) {
+      await this.db.run('ROLLBACK')
+      throw e
     }
-    await this.write(state)
     return reset
   }
 
   async latestSnapshot() {
-    const state = await this.read()
-    return state.snapshots.at(-1) || null
+    const row = await this.db.get('SELECT * FROM snapshots ORDER BY recorded_at DESC LIMIT 1')
+    return this.mapSnapshot(row)
   }
 
   async insertSnapshot(snapshot) {
-    const state = await this.read()
-    state.snapshots.push(snapshot)
-    const cutoff = Date.now() - retentionMs
-    state.snapshots = state.snapshots.filter((entry) => Date.parse(entry.recordedAt) >= cutoff)
-    await this.write(state)
+    await this.db.run(
+      'INSERT INTO snapshots (recorded_at, cumulative_atomic, pending_atomic, paid_atomic, total_hashes, last_hash_seconds) VALUES (?, ?, ?, ?, ?, ?)',
+      [snapshot.recordedAt, snapshot.cumulativeAtomic, snapshot.pendingAtomic, snapshot.paidAtomic, snapshot.totalHashes, snapshot.lastHashSeconds]
+    )
   }
 
   async snapshotsBetween(from, to) {
-    const state = await this.read()
-    const samples = state.snapshots
-    const before = [...samples].reverse().find((entry) => Date.parse(entry.recordedAt) < from)
-    const after = samples.find((entry) => Date.parse(entry.recordedAt) > to)
+    const fromStr = new Date(from).toISOString()
+    const toStr = new Date(to).toISOString()
+    
+    const before = await this.db.get('SELECT * FROM snapshots WHERE recorded_at < ? ORDER BY recorded_at DESC LIMIT 1', [fromStr])
+    const within = await this.db.all('SELECT * FROM snapshots WHERE recorded_at >= ? AND recorded_at <= ? ORDER BY recorded_at', [fromStr, toStr])
+    const after = await this.db.get('SELECT * FROM snapshots WHERE recorded_at > ? ORDER BY recorded_at LIMIT 1', [toStr])
+    
     return [
-      ...(before ? [before] : []),
-      ...samples.filter((entry) => {
-        const at = Date.parse(entry.recordedAt)
-        return at >= from && at <= to
-      }),
-      ...(after ? [after] : []),
+      ...(before ? [this.mapSnapshot(before)] : []),
+      ...within.map(r => this.mapSnapshot(r)),
+      ...(after ? [this.mapSnapshot(after)] : [])
     ]
   }
 
   async insertWorkerSnapshot(recordedAt, workers) {
-    const state = await this.read()
-    state.workerSnapshots.push({ recordedAt, workers })
-    const cutoff = Date.now() - retentionMs
-    state.workerSnapshots = state.workerSnapshots.filter((entry) => Date.parse(entry.recordedAt) >= cutoff)
-    await this.write(state)
+    await this.db.run('BEGIN TRANSACTION')
+    try {
+      for (const worker of workers) {
+        await this.db.run('INSERT INTO worker_snapshots (recorded_at, identifier, cumulative_atomic) VALUES (?, ?, ?)', [recordedAt, worker.identifier, worker.cumulativeAtomic])
+      }
+      await this.db.run('COMMIT')
+    } catch (e) {
+      await this.db.run('ROLLBACK')
+      throw e
+    }
   }
 
   async workerSnapshotsBetween(from, to) {
-    const samples = (await this.read()).workerSnapshots || []
-    const before = [...samples].reverse().find((entry) => Date.parse(entry.recordedAt) < from)
-    const after = samples.find((entry) => Date.parse(entry.recordedAt) > to)
-    return [...(before ? [before] : []), ...samples.filter((entry) => Date.parse(entry.recordedAt) >= from && Date.parse(entry.recordedAt) <= to), ...(after ? [after] : [])]
+    const fromStr = new Date(from).toISOString()
+    const toStr = new Date(to).toISOString()
+    
+    const before = await this.db.all('SELECT * FROM worker_snapshots WHERE recorded_at = (SELECT MAX(recorded_at) FROM worker_snapshots WHERE recorded_at < ?)', [fromStr])
+    const within = await this.db.all('SELECT * FROM worker_snapshots WHERE recorded_at >= ? AND recorded_at <= ? ORDER BY recorded_at', [fromStr, toStr])
+    const after = await this.db.all('SELECT * FROM worker_snapshots WHERE recorded_at = (SELECT MIN(recorded_at) FROM worker_snapshots WHERE recorded_at > ?)', [toStr])
+    
+    const grouped = new Map()
+    for (const row of [...before, ...within, ...after]) {
+      const at = row.recorded_at
+      if (!grouped.has(at)) grouped.set(at, { recordedAt: at, workers: [] })
+      grouped.get(at).workers.push({ identifier: row.identifier, cumulativeAtomic: String(row.cumulative_atomic) })
+    }
+    return [...grouped.values()].sort((a, b) => a.recordedAt.localeCompare(b.recordedAt))
   }
 
   async addDaySample(dayKey, amountAtomic, recordedAt, gap) {
-    const state = await this.read()
-    let day = state.days.find((entry) => entry.dayKey === dayKey)
-    if (!day) {
-      day = { dayKey, earnedAtomic: '0', sampleCount: 0, gapCount: 0, firstAt: recordedAt }
-      state.days.push(day)
+    await this.db.run('BEGIN TRANSACTION')
+    try {
+      const row = await this.db.get('SELECT earned_atomic FROM daily_records WHERE day_key = ?', [dayKey])
+      if (row) {
+        const newEarned = (BigInt(row.earned_atomic) + amountAtomic).toString()
+        await this.db.run('UPDATE daily_records SET earned_atomic = ?, sample_count = sample_count + 1, gap_count = gap_count + ?, last_at = ? WHERE day_key = ?', [newEarned, gap ? 1 : 0, recordedAt, dayKey])
+      } else {
+        await this.db.run('INSERT INTO daily_records (day_key, earned_atomic, sample_count, gap_count, first_at, last_at) VALUES (?, ?, 1, ?, ?, ?)', [dayKey, amountAtomic.toString(), gap ? 1 : 0, recordedAt, recordedAt])
+      }
+      await this.db.run('COMMIT')
+    } catch(e) {
+      await this.db.run('ROLLBACK')
+      throw e
     }
-    day.earnedAtomic = (BigInt(day.earnedAtomic) + amountAtomic).toString()
-    day.sampleCount += 1
-    day.gapCount += gap ? 1 : 0
-    day.lastAt = recordedAt
-    await this.write(state)
   }
 
   async initializeDay(dayKey, recordedAt) {
-    const state = await this.read()
-    if (!state.days.some((entry) => entry.dayKey === dayKey)) {
-      state.days.push({ dayKey, earnedAtomic: '0', sampleCount: 0, gapCount: 0, firstAt: recordedAt, lastAt: recordedAt })
-      await this.write(state)
-    }
+    await this.db.run('INSERT INTO daily_records (day_key, first_at, last_at) VALUES (?, ?, ?) ON CONFLICT (day_key) DO NOTHING', [dayKey, recordedAt, recordedAt])
   }
 
   async finalizeBefore(dayKey) {
-    const state = await this.read()
-    let changed = false
-    for (const day of state.days) {
-      if (day.dayKey < dayKey && !day.finalized) {
-        day.finalized = true
-        changed = true
-      }
-    }
-    if (changed) await this.write(state)
+    await this.db.run('UPDATE daily_records SET finalized = 1 WHERE day_key < ? AND finalized = 0', [dayKey])
   }
 
   async recentDays(limit = 31) {
-    return (await this.read()).days.sort((a, b) => b.dayKey.localeCompare(a.dayKey)).slice(0, limit)
+    const rows = await this.db.all('SELECT * FROM daily_records ORDER BY day_key DESC LIMIT ?', [limit])
+    return rows.map(r => ({
+      dayKey: r.day_key,
+      earnedAtomic: r.earned_atomic,
+      sampleCount: r.sample_count,
+      gapCount: r.gap_count,
+      firstAt: r.first_at,
+      lastAt: r.last_at,
+      finalized: Boolean(r.finalized)
+    }))
   }
 }
 
@@ -236,7 +294,6 @@ class PostgresStore {
       'INSERT INTO snapshots (recorded_at, cumulative_atomic, pending_atomic, paid_atomic, total_hashes, last_hash_seconds) VALUES ($1, $2, $3, $4, $5, $6)',
       [snapshot.recordedAt, snapshot.cumulativeAtomic, snapshot.pendingAtomic, snapshot.paidAtomic, snapshot.totalHashes, snapshot.lastHashSeconds],
     )
-    await this.pool.query('DELETE FROM snapshots WHERE recorded_at < NOW() - INTERVAL \'45 days\'')
   }
 
   async snapshotsBetween(from, to) {
@@ -257,7 +314,6 @@ class PostgresStore {
     try {
       await client.query('BEGIN')
       for (const worker of workers) await client.query('INSERT INTO worker_snapshots (recorded_at, identifier, cumulative_atomic) VALUES ($1, $2, $3)', [recordedAt, worker.identifier, worker.cumulativeAtomic])
-      await client.query("DELETE FROM worker_snapshots WHERE recorded_at < NOW() - INTERVAL '45 days'")
       await client.query('COMMIT')
     } catch (error) {
       await client.query('ROLLBACK')
@@ -321,7 +377,7 @@ class PostgresStore {
 }
 
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null
-const store = pool ? new PostgresStore(pool) : new FileStore()
+const store = pool ? new PostgresStore(pool) : new SqliteStore()
 const state = { lastPollAt: null, lastError: null, isPolling: false }
 
 function timeZoneDayKey(timestamp, timeZone) {
@@ -448,16 +504,40 @@ app.get('/healthz', (_request, response) => response.json({ ok: true }))
 app.get('/api/data', async (request, response) => {
   try {
     const now = Date.now()
-    const from = Math.max(now - retentionMs, Number(request.query.from) || now - 24 * 60 * 60 * 1000)
+    const from = Number(request.query.from) || now - 24 * 60 * 60 * 1000
     const to = Math.min(now, Number(request.query.to) || now)
     if (to < from) return response.status(400).json({ error: 'End time must be after start time' })
-    const [settings, latest, snapshots, workerSnapshots, days] = await Promise.all([
+    let [settings, latest, snapshots, workerSnapshots, days] = await Promise.all([
       store.getSettings(),
       store.latestSnapshot(),
       store.snapshotsBetween(from, to),
       store.workerSnapshotsBetween(from, to),
       store.recentDays(),
     ])
+    
+    const duration = to - from
+    if (duration > 24 * 60 * 60 * 1000) {
+      const bucketBy = duration > 7 * 24 * 60 * 60 * 1000 ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000
+      
+      const downsample = (arr) => {
+        if (arr.length <= 2) return arr
+        const first = arr[0]
+        const last = arr[arr.length - 1]
+        const middle = arr.slice(1, -1)
+        
+        const buckets = new Map()
+        for (const item of middle) {
+          const at = Date.parse(item.recordedAt)
+          const bucket = Math.floor(at / bucketBy)
+          buckets.set(bucket, item)
+        }
+        return [first, ...Array.from(buckets.values()), last]
+      }
+      
+      snapshots = downsample(snapshots)
+      workerSnapshots = downsample(workerSnapshots)
+    }
+
     response.json({ settings, latest, snapshots, workerSnapshots, days, collector: state, serverTime: new Date(now).toISOString() })
   } catch (error) {
     response.status(500).json({ error: error.message || 'Unable to load dashboard data' })
@@ -490,7 +570,8 @@ if (pool) {
   await pool.query('SELECT 1')
   console.info('[storage] PostgreSQL connected')
 } else {
-  console.warn('[storage] Using local JSON storage. Configure DATABASE_URL for persistent deployment storage.')
+  await store.init()
+  console.info('[storage] SQLite local database connected. Configured DATABASE_URL is empty.')
 }
 
 const builtClient = path.join(root, 'dist')
