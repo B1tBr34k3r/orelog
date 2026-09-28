@@ -1,0 +1,504 @@
+import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useMemo, useState } from 'react'
+import {
+  Activity,
+  AlertTriangle,
+  ArrowDownRight,
+  ArrowUpRight,
+  CalendarDays,
+  Check,
+  Clock3,
+  Cpu,
+  Database,
+  KeyRound,
+  RefreshCw,
+  Settings2,
+  ShieldCheck,
+  Wallet,
+  X,
+  Zap,
+} from 'lucide-react'
+import './App.css'
+
+const EarningsChart = lazy(() => import('./EarningsChart'))
+
+type Snapshot = {
+  recordedAt: string
+  cumulativeAtomic: string
+  pendingAtomic: string
+  paidAtomic: string
+  totalHashes: string
+  lastHashSeconds: number
+}
+
+type DailyRecord = {
+  dayKey: string
+  earnedAtomic: string
+  sampleCount: number
+  gapCount: number
+  finalized: boolean
+}
+
+type DashboardData = {
+  settings: { address: string; timeZone: string } | null
+  latest: Snapshot | null
+  snapshots: Snapshot[]
+  days: DailyRecord[]
+  collector: { lastPollAt: string | null; lastError: string | null; isPolling: boolean }
+  serverTime: string
+}
+
+type WindowChoice = 'hour' | 'day' | 'today' | 'custom'
+
+const atomicScale = 1_000_000_000_000n
+const defaultTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+const appStartedAt = Date.now()
+const apiBase = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+
+function formatXmr(value: string | bigint, digits = 8) {
+  const amount = BigInt(value)
+  const negative = amount < 0n
+  const absolute = negative ? -amount : amount
+  const whole = absolute / atomicScale
+  const fraction = (absolute % atomicScale).toString().padStart(12, '0').slice(0, digits)
+  return `${negative ? '-' : ''}${whole.toLocaleString()}.${fraction}`
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value)
+}
+
+function localDayKey(timestamp: number, timeZone: string) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(timestamp))
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `${values.year}-${values.month}-${values.day}`
+}
+
+function zonedMidnight(dayKey: string, timeZone: string) {
+  const [year, month, day] = dayKey.split('-').map(Number)
+  const target = Date.UTC(year, month - 1, day)
+  let guess = target
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(guess))
+    const values = Object.fromEntries(parts.map((part) => [part.type, Number(part.value)]))
+    const represented = Date.UTC(values.year, values.month - 1, values.day, values.hour, values.minute, values.second)
+    guess += target - represented
+  }
+  return guess
+}
+
+function localInput(timestamp: number) {
+  const date = new Date(timestamp - new Date(timestamp).getTimezoneOffset() * 60_000)
+  return date.toISOString().slice(0, 16)
+}
+
+function cumulativeAt(samples: Snapshot[], timestamp: number) {
+  if (!samples.length) return null
+  let previous = samples[0]
+  if (timestamp <= Date.parse(previous.recordedAt)) return BigInt(previous.cumulativeAtomic)
+  for (let index = 1; index < samples.length; index += 1) {
+    const current = samples[index]
+    const previousTime = Date.parse(previous.recordedAt)
+    const currentTime = Date.parse(current.recordedAt)
+    if (timestamp <= currentTime) {
+      const duration = BigInt(Math.max(1, currentTime - previousTime))
+      const elapsed = BigInt(Math.max(0, timestamp - previousTime))
+      const difference = BigInt(current.cumulativeAtomic) - BigInt(previous.cumulativeAtomic)
+      if (difference <= 0n) return BigInt(previous.cumulativeAtomic)
+      return BigInt(previous.cumulativeAtomic) + difference * elapsed / duration
+    }
+    previous = current
+  }
+  return BigInt(previous.cumulativeAtomic)
+}
+
+function intervalAmount(samples: Snapshot[], from: number, to: number) {
+  const start = cumulativeAt(samples, from)
+  const end = cumulativeAt(samples, to)
+  return start === null || end === null || end < start ? 0n : end - start
+}
+
+async function requestJson<T>(url: string, options: RequestInit = {}, accessKey = ''): Promise<T> {
+  const response = await fetch(`${apiBase}${url}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(accessKey ? { 'X-Dashboard-Key': accessKey } : {}),
+      ...options.headers,
+    },
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => null)
+    throw new Error(body?.error || (response.status === 401 ? 'Enter the dashboard password to continue.' : `Request failed (${response.status})`))
+  }
+  if (response.status === 204) return undefined as T
+  return response.json() as Promise<T>
+}
+
+function App() {
+  const [data, setData] = useState<DashboardData | null>(null)
+  const [choice, setChoice] = useState<WindowChoice>('day')
+  const [customFrom, setCustomFrom] = useState(() => localInput(appStartedAt - 60 * 60 * 1000))
+  const [customTo, setCustomTo] = useState(() => localInput(appStartedAt))
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [addressInput, setAddressInput] = useState('')
+  const [timeZoneInput, setTimeZoneInput] = useState(defaultTimeZone)
+  const [passwordInput, setPasswordInput] = useState('')
+  const [accessKey, setAccessKey] = useState(() => sessionStorage.getItem('dashboard-key') || '')
+  const [locked, setLocked] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [clock, setClock] = useState(appStartedAt)
+
+  const checkAccess = useEffectEvent(async () => {
+    try {
+      const meta = await requestJson<{ passwordRequired: boolean }>('/api/meta')
+      if (meta.passwordRequired && !sessionStorage.getItem('dashboard-key')) setLocked(true)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to check dashboard access.')
+    }
+  })
+
+  useEffect(() => {
+    const timer = window.setTimeout(checkAccess, 0)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  const refresh = useCallback(async (startAt?: number, endAt?: number) => {
+    try {
+      const params = new URLSearchParams()
+      if (startAt) params.set('from', String(startAt))
+      if (endAt) params.set('to', String(endAt))
+      const result = await requestJson<DashboardData>(`/api/data?${params}`, {}, accessKey)
+      setData(result)
+      setAddressInput((current) => current || result.settings?.address || '')
+      setTimeZoneInput(result.settings?.timeZone || defaultTimeZone)
+      setError(result.collector.lastError || '')
+      setLocked(false)
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : 'Unable to load dashboard data.'
+      setError(message)
+      if (message.includes('password')) setLocked(true)
+    } finally {
+      setLoading(false)
+    }
+  }, [accessKey])
+
+  const refreshLatestPeriod = useEffectEvent(() => {
+    if (!locked) void refresh()
+  })
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    const initial = window.setTimeout(refreshLatestPeriod, 0)
+    const timer = window.setInterval(refreshLatestPeriod, 60_000)
+    return () => {
+      window.clearTimeout(initial)
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  const timeZone = data?.settings?.timeZone || timeZoneInput || defaultTimeZone
+  const latestAt = data?.latest ? Date.parse(data.latest.recordedAt) : 0
+  const latestAge = latestAt ? Math.max(0, Math.floor((clock - latestAt) / 1000)) : null
+  const minerAge = data?.latest?.lastHashSeconds
+    ? Math.max(0, Math.floor(clock / 1000) - data.latest.lastHashSeconds)
+    : null
+  const minerOnline = minerAge !== null && minerAge < 10 * 60
+  const windowRange = useMemo(() => {
+    const end = latestAt || clock
+    if (choice === 'hour') return { from: end - 60 * 60 * 1000, to: end }
+    if (choice === 'today') return { from: zonedMidnight(localDayKey(end, timeZone), timeZone), to: end }
+    if (choice === 'custom') {
+      const from = Date.parse(customFrom) || end - 60 * 60 * 1000
+      const to = Math.min(Date.parse(customTo) || end, end)
+      return { from: Math.min(from, to), to: Math.max(from, to) }
+    }
+    return { from: end - 24 * 60 * 60 * 1000, to: end }
+  }, [choice, customFrom, customTo, latestAt, clock, timeZone])
+
+  const refreshSelectedRange = useEffectEvent(() => {
+    if (data?.latest && !locked) void refresh(windowRange.from, windowRange.to)
+  })
+
+  useEffect(() => {
+    const timer = window.setTimeout(refreshSelectedRange, 0)
+    return () => window.clearTimeout(timer)
+  }, [choice, customFrom, customTo, data?.latest?.recordedAt, locked])
+
+  const selectedEarned = useMemo(
+    () => intervalAmount(data?.snapshots || [], windowRange.from, windowRange.to),
+    [data?.snapshots, windowRange.from, windowRange.to],
+  )
+  const oneHourEarned = data?.latest && data.snapshots.length
+    ? intervalAmount(data.snapshots, latestAt - 60 * 60 * 1000, latestAt)
+    : 0n
+  const dayKey = localDayKey(latestAt || clock, timeZone)
+  const todayRecord = data?.days.find((day) => day.dayKey === dayKey)
+  const todayEarned = BigInt(todayRecord?.earnedAtomic || '0')
+  const hourlyRate = windowRange.to > windowRange.from
+    ? Number(selectedEarned) / Number(atomicScale) / ((windowRange.to - windowRange.from) / 3_600_000)
+    : 0
+  const chartData = useMemo(() => {
+    const samples = data?.snapshots || []
+    const base = cumulativeAt(samples, windowRange.from)
+    if (base === null) return []
+    const points = [{ at: windowRange.from, earned: 0 }]
+    for (const sample of samples) {
+      const timestamp = Date.parse(sample.recordedAt)
+      if (timestamp < windowRange.from || timestamp > windowRange.to) continue
+      const value = BigInt(sample.cumulativeAtomic) - base
+      points.push({ at: timestamp, earned: Number(value > 0n ? value : 0n) / Number(atomicScale) })
+    }
+    if (points.length === 1 && data?.latest) {
+      const value = intervalAmount(samples, windowRange.from, windowRange.to)
+      points.push({ at: windowRange.to, earned: Number(value) / Number(atomicScale) })
+    }
+    return points
+  }, [data?.snapshots, data?.latest, windowRange.from, windowRange.to])
+
+  const saveSettings = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setSaving(true)
+    setError('')
+    try {
+      const response = await requestJson<{ reset: boolean }>('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ address: addressInput, timeZone: timeZoneInput }),
+      }, accessKey)
+      setSettingsOpen(false)
+      setNotice(response.reset ? 'Wallet or timezone changed. A new earnings log has started.' : 'Miner connected. Logging starts from the first pool snapshot.')
+      await refresh()
+      window.setTimeout(() => setNotice(''), 7000)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to save settings.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const unlock = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    try {
+      await requestJson<void>('/api/access', {
+        method: 'POST',
+        body: JSON.stringify({ password: passwordInput }),
+      })
+      sessionStorage.setItem('dashboard-key', passwordInput)
+      setAccessKey(passwordInput)
+      setPasswordInput('')
+      setLocked(false)
+    } catch {
+      setError('That password was not accepted.')
+    }
+  }
+
+  const chooseWindow = (next: WindowChoice) => {
+    setChoice(next)
+    if (next === 'custom') {
+      setCustomTo(localInput(latestAt || Date.now()))
+      setCustomFrom(localInput((latestAt || Date.now()) - 60 * 60 * 1000))
+    }
+  }
+
+  const activePeriodName = choice === 'hour' ? 'Last hour' : choice === 'today' ? 'Today' : choice === 'custom' ? 'Selected interval' : 'Last 24 hours'
+  const formattedLatest = data?.latest
+    ? new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(new Date(data.latest.recordedAt))
+    : 'Waiting for first snapshot'
+  const refreshWindow = () => {
+    setLoading(true)
+    void refresh(windowRange.from, windowRange.to)
+  }
+
+  if (locked) {
+    return (
+      <main className="access-screen">
+        <form className="access-form" onSubmit={unlock}>
+          <div className="brand-mark"><Zap size={19} /></div>
+          <p className="eyebrow">LOCAL MINING MONITOR</p>
+          <h1>Private dashboard</h1>
+          <p className="muted">Enter the dashboard password configured in your deployment secrets.</p>
+          <label className="field-label" htmlFor="access-password">Password</label>
+          <input id="access-password" autoFocus type="password" value={passwordInput} onChange={(event) => setPasswordInput(event.target.value)} />
+          {error && <p className="form-error">{error}</p>}
+          <button className="button button-primary button-wide" type="submit"><KeyRound size={16} /> Unlock dashboard</button>
+        </form>
+      </main>
+    )
+  }
+
+  if (!loading && !data?.settings) {
+    return (
+      <main className="setup-screen">
+        <header className="topbar setup-topbar">
+          <Brand />
+          <span className="topbar-note"><ShieldCheck size={15} /> Read-only pool connection</span>
+        </header>
+        <section className="setup-content">
+          <div className="setup-index">01 / CONNECT</div>
+          <h1>Start your<br /><span>earnings log.</span></h1>
+          <p className="setup-copy">Connect a miner address to begin measuring credited XMR. Collection starts with the first pool snapshot; prior earnings are not included in interval totals.</p>
+          <form className="setup-form" onSubmit={saveSettings}>
+            <label className="field-label" htmlFor="setup-address">Monero wallet address</label>
+            <input id="setup-address" autoComplete="off" spellCheck={false} value={addressInput} onChange={(event) => setAddressInput(event.target.value)} placeholder="4... or 8..." required />
+            <label className="field-label" htmlFor="setup-timezone">Daily log timezone</label>
+            <input id="setup-timezone" value={timeZoneInput} onChange={(event) => setTimeZoneInput(event.target.value)} placeholder="Europe/London" required />
+            <div className="setup-footnote"><Clock3 size={15} /> Days close at midnight in this timezone.</div>
+            {error && <p className="form-error">{error}</p>}
+            <button className="button button-primary" type="submit" disabled={saving}>{saving ? <RefreshCw className="spin" size={16} /> : <Activity size={16} />} {saving ? 'Connecting…' : 'Connect miner'}</button>
+          </form>
+        </section>
+        <footer className="setup-footer"><span>SUPPORTXMR · XMR TRACKER</span><span>COLLECTION INTERVAL 60 SEC</span></footer>
+      </main>
+    )
+  }
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <Brand />
+        <div className="pool-label"><span className="pool-pip" /> SUPPORTXMR <span className="topbar-divider">/</span> MONERO</div>
+        <div className="topbar-actions">
+          <div className={`connection-state ${data?.collector.lastError ? 'connection-error' : ''}`}>
+            <span className="live-pip" />
+            {data?.collector.lastError ? 'API ISSUE' : loading ? 'SYNCING' : 'COLLECTING'}
+          </div>
+          <button className="icon-button" aria-label="Dashboard settings" title="Dashboard settings" onClick={() => setSettingsOpen(true)}><Settings2 size={18} /></button>
+          <button className="icon-button" aria-label="Refresh data" title="Refresh data" onClick={refreshWindow}><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
+        </div>
+      </header>
+
+      <main className="dashboard-main">
+        <section className="page-heading">
+          <div>
+            <p className="eyebrow">MINER PERFORMANCE <span>·</span> {data?.settings?.address.slice(0, 8)}…{data?.settings?.address.slice(-6)}</p>
+            <h1>Earnings <span>monitor</span></h1>
+          </div>
+          <div className="activity-badge">
+            <span className={`activity-pip ${minerOnline ? '' : 'activity-idle'}`} />
+            <div><strong>{minerOnline ? 'Miner active' : 'No recent shares'}</strong><small>{minerAge === null ? 'Waiting for first share' : minerOnline ? `Last share ${formatAge(minerAge)} ago` : `Last share ${formatAge(minerAge)} ago`}</small></div>
+          </div>
+        </section>
+
+        {notice && <div className="notice"><Check size={16} /> {notice}<button aria-label="Dismiss notice" onClick={() => setNotice('')}><X size={15} /></button></div>}
+        {error && <div className="error-banner"><AlertTriangle size={16} /><span>{error}</span></div>}
+
+        <section className="earnings-layout">
+          <div className="earnings-focus">
+            <div className="focus-topline"><span><Activity size={15} /> CREDITS IN INTERVAL</span><span className="asof">AS OF {formattedLatest}</span></div>
+            <div className="focus-value"><span>{formatXmr(selectedEarned)}</span><em>XMR</em></div>
+            <div className="focus-bottomline">
+              <div className="rate-readout"><ArrowUpRight size={16} /><strong>{formatXmr(BigInt(Math.max(0, Math.round(hourlyRate * Number(atomicScale)))))}</strong><span>XMR / HR</span></div>
+              <div className="window-controls" role="group" aria-label="Earnings interval">
+                <button className={choice === 'hour' ? 'selected' : ''} onClick={() => chooseWindow('hour')}>1H</button>
+                <button className={choice === 'day' ? 'selected' : ''} onClick={() => chooseWindow('day')}>24H</button>
+                <button className={choice === 'today' ? 'selected' : ''} onClick={() => chooseWindow('today')}>TODAY</button>
+                <button className={choice === 'custom' ? 'selected' : ''} onClick={() => chooseWindow('custom')}><CalendarDays size={14} /><span>CUSTOM</span></button>
+              </div>
+            </div>
+            {choice === 'custom' && <div className="custom-range">
+              <label>FROM <input aria-label="Interval start" type="datetime-local" value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} /></label>
+              <ArrowDownRight size={14} />
+              <label>TO <input aria-label="Interval end" type="datetime-local" value={customTo} onChange={(event) => setCustomTo(event.target.value)} /></label>
+              <span>Device local time</span>
+            </div>}
+          </div>
+
+          <div className="metric-stack">
+            <Metric label="TODAY · MIDNIGHT RESET" value={formatXmr(todayEarned)} unit="XMR" icon={<CalendarDays size={16} />} accent="orange" />
+            <Metric label="PENDING BALANCE" value={formatXmr(data?.latest?.pendingAtomic || '0')} unit="XMR" icon={<Wallet size={16} />} accent="mint" />
+            <Metric label="LAST HOUR" value={formatXmr(oneHourEarned)} unit="XMR" icon={<Zap size={16} />} accent="blue" />
+          </div>
+        </section>
+
+        <section className="chart-section">
+          <div className="section-heading">
+            <div><p className="eyebrow">CUMULATIVE POOL CREDIT</p><h2>{activePeriodName}</h2></div>
+            <div className="chart-legend"><span /> EARNED XMR</div>
+          </div>
+          <div className="chart-wrap">
+            {chartData.length > 1 ? <Suspense fallback={<div className="chart-empty">Loading chart…</div>}>
+              <EarningsChart data={chartData} from={windowRange.from} to={windowRange.to} />
+            </Suspense> : <div className="chart-empty"><Activity size={19} /><span>{data?.latest ? 'More snapshots will shape this chart.' : 'Waiting for the first pool snapshot.'}</span></div>}
+          </div>
+          <div className="chart-foot"><span>INTERVAL START <strong>{new Date(windowRange.from).toLocaleString()}</strong></span><span>ESTIMATED RATE <strong>{formatXmr(BigInt(Math.max(0, Math.round(hourlyRate * Number(atomicScale)))))} XMR / HR</strong></span><span>COLLECTION EVERY 60 SEC</span></div>
+        </section>
+
+        <section className="lower-grid">
+          <div className="daily-panel">
+            <div className="section-heading lower-heading"><div><p className="eyebrow">LOCAL MIDNIGHT CLOSE</p><h2>Daily earnings</h2></div><span className="timezone-tag">{timeZone}</span></div>
+            <div className="daily-table-wrap">
+              <table className="daily-table">
+                <thead><tr><th>DAY</th><th>EARNED</th><th>STATUS</th></tr></thead>
+                <tbody>{(data?.days || []).slice(0, 8).map((day) => <tr key={day.dayKey}>
+                  <td><span className="day-date">{day.dayKey}</span><small>{day.sampleCount.toLocaleString()} samples{day.gapCount > 0 ? ` · ${day.gapCount} gaps` : ''}</small></td>
+                  <td className="daily-amount">{formatXmr(day.earnedAtomic)} <small>XMR</small></td>
+                  <td><span className={`record-status ${day.finalized ? 'finalized' : 'recording'}`}><span />{day.finalized ? 'FINAL' : 'RECORDING'}</span></td>
+                </tr>)}</tbody>
+              </table>
+              {!data?.days.length && <div className="table-empty">The daily log begins with your first pool snapshot.</div>}
+            </div>
+            <p className="table-note"><ShieldCheck size={14} /> Daily totals are based on pool-reported balance changes. Gap periods are proportionally allocated and flagged.</p>
+          </div>
+
+          <aside className="status-panel">
+            <div className="section-heading lower-heading"><div><p className="eyebrow">COLLECTOR STATUS</p><h2>System pulse</h2></div><span className={`pulse-icon ${data?.collector.lastError ? 'pulse-error' : ''}`}><Activity size={18} /></span></div>
+            <div className="pulse-row"><span><span className={`status-dot ${data?.collector.lastError ? 'dot-error' : ''}`} />POOL API</span><strong>{data?.collector.lastError ? 'CHECK CONNECTION' : 'RESPONDING'}</strong></div>
+            <div className="pulse-row"><span><Database size={14} />STORAGE</span><strong>{data?.latest ? 'RECORDING' : 'READY'}</strong></div>
+            <div className="pulse-row"><span><Clock3 size={14} />LAST CHECK</span><strong>{latestAge === null ? '—' : `${formatAge(latestAge)} AGO`}</strong></div>
+            <div className="pulse-row"><span><Cpu size={14} />TOTAL HASHES</span><strong>{formatNumber(Number(data?.latest?.totalHashes || 0))}</strong></div>
+            <div className="pulse-foot"><span className="pool-pip" /> READ-ONLY · SUPPORTXMR</div>
+          </aside>
+        </section>
+
+        <footer className="app-footer"><span>SUPPORTXMR EARNINGS MONITOR</span><span>POOL VALUES REFRESH ON A 60-SECOND CADENCE</span><span>LAST RESPONSE {formattedLatest}</span></footer>
+      </main>
+
+      {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false) }}>
+        <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+          <div className="dialog-heading"><div><p className="eyebrow">MONITOR CONFIGURATION</p><h2 id="settings-title">Miner settings</h2></div><button className="icon-button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}><X size={18} /></button></div>
+          <form className="setup-form" onSubmit={saveSettings}>
+            <label className="field-label" htmlFor="settings-address">Monero wallet address</label>
+            <input id="settings-address" autoComplete="off" spellCheck={false} value={addressInput} onChange={(event) => setAddressInput(event.target.value)} required />
+            <label className="field-label" htmlFor="settings-timezone">Daily log timezone</label>
+            <input id="settings-timezone" value={timeZoneInput} onChange={(event) => setTimeZoneInput(event.target.value)} required />
+            <p className="settings-warning"><AlertTriangle size={15} /> Changing the wallet or timezone clears this local earnings history and starts a new log.</p>
+            {error && <p className="form-error">{error}</p>}
+            <div className="dialog-actions"><button className="button button-quiet" type="button" onClick={() => setSettingsOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button></div>
+          </form>
+        </section>
+      </div>}
+    </div>
+  )
+}
+
+function Brand() {
+  return <div className="brand"><span className="brand-mark"><Zap size={16} fill="currentColor" /></span><span>ORE<span className="brand-light">LOG</span></span></div>
+}
+
+function Metric({ label, value, unit, icon, accent }: { label: string; value: string; unit: string; icon: React.ReactNode; accent: string }) {
+  return <article className={`metric-card metric-${accent}`}><div className="metric-label"><span>{label}</span><span className="metric-icon">{icon}</span></div><div className="metric-value"><span>{value}</span><small>{unit}</small></div></article>
+}
+
+function formatAge(seconds: number) {
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`
+}
+
+export default App
