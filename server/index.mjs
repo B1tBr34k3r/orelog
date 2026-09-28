@@ -16,186 +16,136 @@ const parseJson = JSONbig({ storeAsString: true })
 const app = express()
 
 app.use(express.json({ limit: '16kb' }))
-import sqlite3 from 'sqlite3'
-import { open } from 'sqlite'
+import { appendFile } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import readline from 'node:readline'
 
-class SqliteStore {
-  async init() {
-    await mkdir(path.dirname(dataPath), { recursive: true })
-    this.db = await open({
-      filename: dataPath.replace('.json', '.db'),
-      driver: sqlite3.Database
-    })
-    
-    await this.db.exec(`
-      CREATE TABLE IF NOT EXISTS dashboard_settings (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        address TEXT NOT NULL,
-        time_zone TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS snapshots (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        recorded_at TEXT NOT NULL,
-        cumulative_atomic TEXT NOT NULL,
-        pending_atomic TEXT NOT NULL,
-        paid_atomic TEXT NOT NULL,
-        total_hashes TEXT NOT NULL,
-        last_hash_seconds INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS snapshots_recorded_at_idx ON snapshots (recorded_at);
-      CREATE TABLE IF NOT EXISTS worker_snapshots (
-        recorded_at TEXT NOT NULL,
-        identifier TEXT NOT NULL,
-        cumulative_atomic TEXT NOT NULL,
-        PRIMARY KEY (recorded_at, identifier)
-      );
-      CREATE INDEX IF NOT EXISTS worker_snapshots_recorded_at_idx ON worker_snapshots (recorded_at);
-      CREATE TABLE IF NOT EXISTS daily_records (
-        day_key TEXT PRIMARY KEY,
-        earned_atomic TEXT NOT NULL DEFAULT '0',
-        sample_count INTEGER NOT NULL DEFAULT 0,
-        gap_count INTEGER NOT NULL DEFAULT 0,
-        first_at TEXT,
-        last_at TEXT,
-        finalized INTEGER NOT NULL DEFAULT 0
-      );
-    `)
+class JsonlStore {
+  constructor() {
+    this.memory = { settings: null, snapshots: [], workerSnapshots: [], days: [] }
+    this.dir = path.join(path.dirname(dataPath), 'jsonl')
   }
 
-  mapSnapshot(row) {
-    if (!row) return null
-    return {
-      recordedAt: row.recorded_at,
-      cumulativeAtomic: row.cumulative_atomic,
-      pendingAtomic: row.pending_atomic,
-      paidAtomic: row.paid_atomic,
-      totalHashes: row.total_hashes,
-      lastHashSeconds: row.last_hash_seconds,
+  async init() {
+    await mkdir(this.dir, { recursive: true })
+    try {
+      this.memory.settings = JSON.parse(await readFile(path.join(this.dir, 'settings.json'), 'utf8'))
+    } catch {}
+    try {
+      this.memory.days = JSON.parse(await readFile(path.join(this.dir, 'days.json'), 'utf8'))
+    } catch {}
+    
+    await this.loadJsonl('snapshots.jsonl', this.memory.snapshots)
+    await this.loadJsonl('worker_snapshots.jsonl', this.memory.workerSnapshots)
+  }
+
+  async loadJsonl(filename, array) {
+    try {
+      const stream = createReadStream(path.join(this.dir, filename))
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
+      for await (const line of rl) {
+        if (line.trim()) array.push(JSON.parse(line))
+      }
+    } catch (e) {
+      if (e.code !== 'ENOENT') console.error(e)
     }
   }
 
   async getSettings() {
-    const row = await this.db.get('SELECT address, time_zone FROM dashboard_settings WHERE id = 1')
-    return row ? { address: row.address, timeZone: row.time_zone } : null
+    return this.memory.settings
   }
 
   async saveSettings(settings) {
-    const previous = await this.getSettings()
+    const previous = this.memory.settings
     const reset = Boolean(previous && (previous.address !== settings.address || previous.timeZone !== settings.timeZone))
+    this.memory.settings = settings
+    await writeFile(path.join(this.dir, 'settings.json'), JSON.stringify(settings))
     
-    await this.db.run('BEGIN TRANSACTION')
-    try {
-      await this.db.run(
-        'INSERT INTO dashboard_settings (id, address, time_zone) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET address = excluded.address, time_zone = excluded.time_zone',
-        [settings.address, settings.timeZone]
-      )
-      if (reset) {
-        await this.db.run('DELETE FROM snapshots')
-        await this.db.run('DELETE FROM sqlite_sequence WHERE name="snapshots"')
-        await this.db.run('DELETE FROM worker_snapshots')
-        await this.db.run('DELETE FROM daily_records')
-      }
-      await this.db.run('COMMIT')
-    } catch (e) {
-      await this.db.run('ROLLBACK')
-      throw e
+    if (reset) {
+      this.memory.snapshots = []
+      this.memory.workerSnapshots = []
+      this.memory.days = []
+      await writeFile(path.join(this.dir, 'snapshots.jsonl'), '')
+      await writeFile(path.join(this.dir, 'worker_snapshots.jsonl'), '')
+      await writeFile(path.join(this.dir, 'days.json'), '[]')
     }
     return reset
   }
 
   async latestSnapshot() {
-    const row = await this.db.get('SELECT * FROM snapshots ORDER BY recorded_at DESC LIMIT 1')
-    return this.mapSnapshot(row)
+    return this.memory.snapshots.at(-1) || null
   }
 
   async insertSnapshot(snapshot) {
-    await this.db.run(
-      'INSERT INTO snapshots (recorded_at, cumulative_atomic, pending_atomic, paid_atomic, total_hashes, last_hash_seconds) VALUES (?, ?, ?, ?, ?, ?)',
-      [snapshot.recordedAt, snapshot.cumulativeAtomic, snapshot.pendingAtomic, snapshot.paidAtomic, snapshot.totalHashes, snapshot.lastHashSeconds]
-    )
+    this.memory.snapshots.push(snapshot)
+    await appendFile(path.join(this.dir, 'snapshots.jsonl'), JSON.stringify(snapshot) + '\n')
   }
 
   async snapshotsBetween(from, to) {
-    const fromStr = new Date(from).toISOString()
-    const toStr = new Date(to).toISOString()
-    
-    const before = await this.db.get('SELECT * FROM snapshots WHERE recorded_at < ? ORDER BY recorded_at DESC LIMIT 1', [fromStr])
-    const within = await this.db.all('SELECT * FROM snapshots WHERE recorded_at >= ? AND recorded_at <= ? ORDER BY recorded_at', [fromStr, toStr])
-    const after = await this.db.get('SELECT * FROM snapshots WHERE recorded_at > ? ORDER BY recorded_at LIMIT 1', [toStr])
-    
-    return [
-      ...(before ? [this.mapSnapshot(before)] : []),
-      ...within.map(r => this.mapSnapshot(r)),
-      ...(after ? [this.mapSnapshot(after)] : [])
-    ]
+    const samples = this.memory.snapshots
+    const before = [...samples].reverse().find(e => Date.parse(e.recordedAt) < from)
+    const within = samples.filter(e => {
+      const at = Date.parse(e.recordedAt)
+      return at >= from && at <= to
+    })
+    const after = samples.find(e => Date.parse(e.recordedAt) > to)
+    return [...(before ? [before] : []), ...within, ...(after ? [after] : [])]
   }
 
   async insertWorkerSnapshot(recordedAt, workers) {
-    await this.db.run('BEGIN TRANSACTION')
-    try {
-      for (const worker of workers) {
-        await this.db.run('INSERT INTO worker_snapshots (recorded_at, identifier, cumulative_atomic) VALUES (?, ?, ?)', [recordedAt, worker.identifier, worker.cumulativeAtomic])
-      }
-      await this.db.run('COMMIT')
-    } catch (e) {
-      await this.db.run('ROLLBACK')
-      throw e
-    }
+    const snapshot = { recordedAt, workers }
+    this.memory.workerSnapshots.push(snapshot)
+    await appendFile(path.join(this.dir, 'worker_snapshots.jsonl'), JSON.stringify(snapshot) + '\n')
   }
 
   async workerSnapshotsBetween(from, to) {
-    const fromStr = new Date(from).toISOString()
-    const toStr = new Date(to).toISOString()
-    
-    const before = await this.db.all('SELECT * FROM worker_snapshots WHERE recorded_at = (SELECT MAX(recorded_at) FROM worker_snapshots WHERE recorded_at < ?)', [fromStr])
-    const within = await this.db.all('SELECT * FROM worker_snapshots WHERE recorded_at >= ? AND recorded_at <= ? ORDER BY recorded_at', [fromStr, toStr])
-    const after = await this.db.all('SELECT * FROM worker_snapshots WHERE recorded_at = (SELECT MIN(recorded_at) FROM worker_snapshots WHERE recorded_at > ?)', [toStr])
-    
-    const grouped = new Map()
-    for (const row of [...before, ...within, ...after]) {
-      const at = row.recorded_at
-      if (!grouped.has(at)) grouped.set(at, { recordedAt: at, workers: [] })
-      grouped.get(at).workers.push({ identifier: row.identifier, cumulativeAtomic: String(row.cumulative_atomic) })
-    }
-    return [...grouped.values()].sort((a, b) => a.recordedAt.localeCompare(b.recordedAt))
+    const samples = this.memory.workerSnapshots
+    const before = [...samples].reverse().find(e => Date.parse(e.recordedAt) < from)
+    const within = samples.filter(e => {
+      const at = Date.parse(e.recordedAt)
+      return at >= from && at <= to
+    })
+    const after = samples.find(e => Date.parse(e.recordedAt) > to)
+    return [...(before ? [before] : []), ...within, ...(after ? [after] : [])]
+  }
+
+  async saveDays() {
+    await writeFile(path.join(this.dir, 'days.json'), JSON.stringify(this.memory.days))
   }
 
   async addDaySample(dayKey, amountAtomic, recordedAt, gap) {
-    await this.db.run('BEGIN TRANSACTION')
-    try {
-      const row = await this.db.get('SELECT earned_atomic FROM daily_records WHERE day_key = ?', [dayKey])
-      if (row) {
-        const newEarned = (BigInt(row.earned_atomic) + amountAtomic).toString()
-        await this.db.run('UPDATE daily_records SET earned_atomic = ?, sample_count = sample_count + 1, gap_count = gap_count + ?, last_at = ? WHERE day_key = ?', [newEarned, gap ? 1 : 0, recordedAt, dayKey])
-      } else {
-        await this.db.run('INSERT INTO daily_records (day_key, earned_atomic, sample_count, gap_count, first_at, last_at) VALUES (?, ?, 1, ?, ?, ?)', [dayKey, amountAtomic.toString(), gap ? 1 : 0, recordedAt, recordedAt])
-      }
-      await this.db.run('COMMIT')
-    } catch(e) {
-      await this.db.run('ROLLBACK')
-      throw e
+    let day = this.memory.days.find(d => d.dayKey === dayKey)
+    if (!day) {
+      day = { dayKey, earnedAtomic: '0', sampleCount: 0, gapCount: 0, firstAt: recordedAt }
+      this.memory.days.push(day)
     }
+    day.earnedAtomic = (BigInt(day.earnedAtomic) + BigInt(amountAtomic)).toString()
+    day.sampleCount += 1
+    day.gapCount += gap ? 1 : 0
+    day.lastAt = recordedAt
+    await this.saveDays()
   }
 
   async initializeDay(dayKey, recordedAt) {
-    await this.db.run('INSERT INTO daily_records (day_key, first_at, last_at) VALUES (?, ?, ?) ON CONFLICT (day_key) DO NOTHING', [dayKey, recordedAt, recordedAt])
+    if (!this.memory.days.some(d => d.dayKey === dayKey)) {
+      this.memory.days.push({ dayKey, earnedAtomic: '0', sampleCount: 0, gapCount: 0, firstAt: recordedAt, lastAt: recordedAt })
+      await this.saveDays()
+    }
   }
 
   async finalizeBefore(dayKey) {
-    await this.db.run('UPDATE daily_records SET finalized = 1 WHERE day_key < ? AND finalized = 0', [dayKey])
+    let changed = false
+    for (const day of this.memory.days) {
+      if (day.dayKey < dayKey && !day.finalized) {
+        day.finalized = true
+        changed = true
+      }
+    }
+    if (changed) await this.saveDays()
   }
 
   async recentDays(limit = 31) {
-    const rows = await this.db.all('SELECT * FROM daily_records ORDER BY day_key DESC LIMIT ?', [limit])
-    return rows.map(r => ({
-      dayKey: r.day_key,
-      earnedAtomic: r.earned_atomic,
-      sampleCount: r.sample_count,
-      gapCount: r.gap_count,
-      firstAt: r.first_at,
-      lastAt: r.last_at,
-      finalized: Boolean(r.finalized)
-    }))
+    return [...this.memory.days].sort((a, b) => b.dayKey.localeCompare(a.dayKey)).slice(0, limit)
   }
 }
 
@@ -377,7 +327,7 @@ class PostgresStore {
 }
 
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null
-const store = pool ? new PostgresStore(pool) : new SqliteStore()
+const store = pool ? new PostgresStore(pool) : new JsonlStore()
 const state = { lastPollAt: null, lastError: null, isPolling: false }
 
 function timeZoneDayKey(timestamp, timeZone) {
@@ -571,7 +521,7 @@ if (pool) {
   console.info('[storage] PostgreSQL connected')
 } else {
   await store.init()
-  console.info('[storage] SQLite local database connected. Configured DATABASE_URL is empty.')
+  console.info('[storage] Pure-JS JSONL database connected. Configured DATABASE_URL is empty.')
 }
 
 const builtClient = path.join(root, 'dist')
