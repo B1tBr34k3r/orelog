@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dataPath = path.join(root, 'data', 'records.json')
 const port = Number(process.env.PORT || 3000)
-const host = process.env.HOST || '127.0.0.1'
+const host = process.env.HOST || '0.0.0.0'
 const pollInterval = 60_000
 const retentionMs = 45 * 24 * 60 * 60 * 1000
 const parseJson = JSONbig({ storeAsString: true })
