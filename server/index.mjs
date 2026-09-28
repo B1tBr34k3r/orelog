@@ -18,13 +18,15 @@ const app = express()
 app.use(express.json({ limit: '16kb' }))
 
 function emptyState() {
-  return { settings: null, snapshots: [], days: [] }
+  return { settings: null, snapshots: [], workerSnapshots: [], days: [] }
 }
 
 class FileStore {
   async read() {
     try {
-      return JSON.parse(await readFile(dataPath, 'utf8'))
+      const state = JSON.parse(await readFile(dataPath, 'utf8'))
+      state.workerSnapshots ||= []
+      return state
     } catch (error) {
       if (error.code === 'ENOENT') return emptyState()
       throw error
@@ -50,6 +52,7 @@ class FileStore {
     state.settings = settings
     if (reset) {
       state.snapshots = []
+      state.workerSnapshots = []
       state.days = []
     }
     await this.write(state)
@@ -82,6 +85,21 @@ class FileStore {
       }),
       ...(after ? [after] : []),
     ]
+  }
+
+  async insertWorkerSnapshot(recordedAt, workers) {
+    const state = await this.read()
+    state.workerSnapshots.push({ recordedAt, workers })
+    const cutoff = Date.now() - retentionMs
+    state.workerSnapshots = state.workerSnapshots.filter((entry) => Date.parse(entry.recordedAt) >= cutoff)
+    await this.write(state)
+  }
+
+  async workerSnapshotsBetween(from, to) {
+    const samples = (await this.read()).workerSnapshots || []
+    const before = [...samples].reverse().find((entry) => Date.parse(entry.recordedAt) < from)
+    const after = samples.find((entry) => Date.parse(entry.recordedAt) > to)
+    return [...(before ? [before] : []), ...samples.filter((entry) => Date.parse(entry.recordedAt) >= from && Date.parse(entry.recordedAt) <= to), ...(after ? [after] : [])]
   }
 
   async addDaySample(dayKey, amountAtomic, recordedAt, gap) {
@@ -145,6 +163,13 @@ class PostgresStore {
         last_hash_seconds BIGINT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS snapshots_recorded_at_idx ON snapshots (recorded_at);
+      CREATE TABLE IF NOT EXISTS worker_snapshots (
+        recorded_at TIMESTAMPTZ NOT NULL,
+        identifier TEXT NOT NULL,
+        cumulative_atomic NUMERIC(40, 0) NOT NULL,
+        PRIMARY KEY (recorded_at, identifier)
+      );
+      CREATE INDEX IF NOT EXISTS worker_snapshots_recorded_at_idx ON worker_snapshots (recorded_at);
       CREATE TABLE IF NOT EXISTS daily_records (
         day_key TEXT PRIMARY KEY,
         earned_atomic NUMERIC(40, 0) NOT NULL DEFAULT 0,
@@ -188,6 +213,7 @@ class PostgresStore {
       )
       if (reset) {
         await client.query('TRUNCATE snapshots RESTART IDENTITY')
+        await client.query('DELETE FROM worker_snapshots')
         await client.query('DELETE FROM daily_records')
       }
       await client.query('COMMIT')
@@ -224,6 +250,34 @@ class PostgresStore {
       ...within.rows.map((row) => this.mapSnapshot(row)),
       ...(after.rows[0] ? [this.mapSnapshot(after.rows[0])] : []),
     ]
+  }
+
+  async insertWorkerSnapshot(recordedAt, workers) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      for (const worker of workers) await client.query('INSERT INTO worker_snapshots (recorded_at, identifier, cumulative_atomic) VALUES ($1, $2, $3)', [recordedAt, worker.identifier, worker.cumulativeAtomic])
+      await client.query("DELETE FROM worker_snapshots WHERE recorded_at < NOW() - INTERVAL '45 days'")
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
+  }
+
+  async workerSnapshotsBetween(from, to) {
+    const [before, within, after] = await Promise.all([
+      this.pool.query('SELECT * FROM worker_snapshots WHERE recorded_at < $1 ORDER BY recorded_at DESC LIMIT 1', [new Date(from)]),
+      this.pool.query('SELECT * FROM worker_snapshots WHERE recorded_at >= $1 AND recorded_at <= $2 ORDER BY recorded_at', [new Date(from), new Date(to)]),
+      this.pool.query('SELECT * FROM worker_snapshots WHERE recorded_at > $1 ORDER BY recorded_at LIMIT 1', [new Date(to)]),
+    ])
+    const grouped = new Map()
+    for (const row of [...before.rows, ...within.rows, ...after.rows]) {
+      const recordedAt = new Date(row.recorded_at).toISOString()
+      if (!grouped.has(recordedAt)) grouped.set(recordedAt, { recordedAt, workers: [] })
+      grouped.get(recordedAt).workers.push({ identifier: row.identifier, cumulativeAtomic: String(row.cumulative_atomic) })
+    }
+    return [...grouped.values()]
   }
 
   async addDaySample(dayKey, amountAtomic, recordedAt, gap) {
@@ -361,8 +415,21 @@ async function pollPool() {
       totalHashes: String(Math.max(0, Number(stats.totalHashes) || 0)),
       lastHashSeconds: Math.max(0, Number(stats.lastHash) || 0),
     }
+    let workerStats = []
+    try {
+      const workerResponse = await fetch(`https://www.supportxmr.com/api/miner/${encodeURIComponent(settings.address)}/stats/allWorkers`, { signal: AbortSignal.timeout(12_000) })
+      if (workerResponse.ok) {
+        const body = parseJson.parse(await workerResponse.text())
+        const entries = Array.isArray(body) ? body : Object.entries(body || {}).map(([identifier, value]) => ({ identifier, ...value }))
+        workerStats = entries.filter((worker) => worker && typeof worker === 'object').map((worker, index) => ({
+          identifier: String(worker.identifier ?? worker.id ?? worker.worker ?? (entries.length === 1 ? 'default' : `worker-${index + 1}`)) || 'default',
+          cumulativeAtomic: (BigInt(toAtomic(worker.amtDue ?? 0)) + BigInt(toAtomic(worker.amtPaid ?? 0))).toString(),
+        }))
+      }
+    } catch (error) { console.warn('[workers] Unable to load worker stats:', error.message) }
     const previous = await store.latestSnapshot()
     await store.insertSnapshot(snapshot)
+    if (workerStats.length) await store.insertWorkerSnapshot(recordedAt, workerStats)
     if (previous) await allocateDelta(previous, snapshot, settings)
     else await store.initializeDay(timeZoneDayKey(Date.now(), settings.timeZone), recordedAt)
     await store.finalizeBefore(timeZoneDayKey(Date.now(), settings.timeZone))
@@ -376,25 +443,7 @@ async function pollPool() {
   }
 }
 
-function passwordMatches(candidate) {
-  const expected = process.env.DASHBOARD_PASSWORD
-  if (!expected) return true
-  const candidateHash = createHash('sha256').update(candidate || '').digest()
-  const expectedHash = createHash('sha256').update(expected).digest()
-  return timingSafeEqual(candidateHash, expectedHash)
-}
-
 app.get('/healthz', (_request, response) => response.json({ ok: true }))
-app.get('/api/meta', (_request, response) => response.json({ passwordRequired: Boolean(process.env.DASHBOARD_PASSWORD) }))
-app.post('/api/access', (request, response) => {
-  if (passwordMatches(String(request.body?.password || ''))) return response.sendStatus(204)
-  return response.sendStatus(401)
-})
-app.use('/api', (request, response, next) => {
-  if (request.path === '/meta' || request.path === '/access' || !process.env.DASHBOARD_PASSWORD) return next()
-  if (passwordMatches(request.get('x-dashboard-key') || '')) return next()
-  return response.sendStatus(401)
-})
 
 app.get('/api/data', async (request, response) => {
   try {
@@ -402,13 +451,14 @@ app.get('/api/data', async (request, response) => {
     const from = Math.max(now - retentionMs, Number(request.query.from) || now - 24 * 60 * 60 * 1000)
     const to = Math.min(now, Number(request.query.to) || now)
     if (to < from) return response.status(400).json({ error: 'End time must be after start time' })
-    const [settings, latest, snapshots, days] = await Promise.all([
+    const [settings, latest, snapshots, workerSnapshots, days] = await Promise.all([
       store.getSettings(),
       store.latestSnapshot(),
       store.snapshotsBetween(from, to),
+      store.workerSnapshotsBetween(from, to),
       store.recentDays(),
     ])
-    response.json({ settings, latest, snapshots, days, collector: state, serverTime: new Date(now).toISOString() })
+    response.json({ settings, latest, snapshots, workerSnapshots, days, collector: state, serverTime: new Date(now).toISOString() })
   } catch (error) {
     response.status(500).json({ error: error.message || 'Unable to load dashboard data' })
   }

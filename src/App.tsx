@@ -30,6 +30,8 @@ type Snapshot = {
   lastHashSeconds: number
 }
 
+type WorkerSnapshot = { recordedAt: string; workers: { identifier: string; cumulativeAtomic: string }[] }
+
 type DailyRecord = {
   dayKey: string
   earnedAtomic: string
@@ -42,6 +44,7 @@ type DashboardData = {
   settings: { address: string; timeZone: string } | null
   latest: Snapshot | null
   snapshots: Snapshot[]
+  workerSnapshots: WorkerSnapshot[]
   days: DailyRecord[]
   collector: { lastPollAt: string | null; lastError: string | null; isPolling: boolean }
   serverTime: string
@@ -125,6 +128,35 @@ function intervalAmount(samples: Snapshot[], from: number, to: number) {
   return start === null || end === null || end < start ? 0n : end - start
 }
 
+function workerCumulativeAt(samples: WorkerSnapshot[], identifier: string, timestamp: number) {
+  const ordered = [...samples].sort((a, b) => Date.parse(a.recordedAt) - Date.parse(b.recordedAt))
+  if (!ordered.length) return null
+  const valueAt = (snapshot: WorkerSnapshot) => snapshot.workers.find((worker) => worker.identifier === identifier)?.cumulativeAtomic
+  let value: string = valueAt(ordered[0]) ?? '0'
+  if (value === undefined) value = '0'
+  if (timestamp <= Date.parse(ordered[0].recordedAt)) return BigInt(value)
+  for (let index = 1; index < ordered.length; index += 1) {
+    const current = ordered[index]
+    const previous = ordered[index - 1]
+    const previousValue: string = valueAt(previous) ?? value
+    const currentValue: string = valueAt(current) ?? previousValue
+    if (timestamp <= Date.parse(current.recordedAt)) {
+      const duration = BigInt(Math.max(1, Date.parse(current.recordedAt) - Date.parse(previous.recordedAt)))
+      const elapsed = BigInt(Math.max(0, timestamp - Date.parse(previous.recordedAt)))
+      const difference = BigInt(currentValue) - BigInt(previousValue)
+      return difference <= 0n ? BigInt(previousValue) : BigInt(previousValue) + difference * elapsed / duration
+    }
+    value = currentValue
+  }
+  return BigInt(value)
+}
+
+function workerIntervalAmount(samples: WorkerSnapshot[], identifier: string, from: number, to: number) {
+  const start = workerCumulativeAt(samples, identifier, from)
+  const end = workerCumulativeAt(samples, identifier, to)
+  return start === null || end === null || end < start ? 0n : end - start
+}
+
 async function requestJson<T>(url: string, options: RequestInit = {}, accessKey = ''): Promise<T> {
   const response = await fetch(url, {
     ...options,
@@ -145,6 +177,7 @@ async function requestJson<T>(url: string, options: RequestInit = {}, accessKey 
 function App() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [choice, setChoice] = useState<WindowChoice>('day')
+  const [selectedWorker, setSelectedWorker] = useState('all')
   const [customFrom, setCustomFrom] = useState(() => localInput(appStartedAt - 60 * 60 * 1000))
   const [customTo, setCustomTo] = useState(() => localInput(appStartedAt))
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -159,19 +192,7 @@ function App() {
   const [notice, setNotice] = useState('')
   const [clock, setClock] = useState(appStartedAt)
 
-  const checkAccess = useEffectEvent(async () => {
-    try {
-      const meta = await requestJson<{ passwordRequired: boolean }>('/api/meta')
-      if (meta.passwordRequired && !sessionStorage.getItem('dashboard-key')) setLocked(true)
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Unable to check dashboard access.')
-    }
-  })
 
-  useEffect(() => {
-    const timer = window.setTimeout(checkAccess, 0)
-    return () => window.clearTimeout(timer)
-  }, [])
 
   const refresh = useCallback(async (startAt?: number, endAt?: number) => {
     try {
@@ -239,10 +260,11 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [choice, customFrom, customTo, data?.latest?.recordedAt, locked])
 
-  const selectedEarned = useMemo(
-    () => intervalAmount(data?.snapshots || [], windowRange.from, windowRange.to),
-    [data?.snapshots, windowRange.from, windowRange.to],
-  )
+  const workerIds = useMemo(() => [...new Set((data?.workerSnapshots || []).flatMap((sample) => sample.workers.map((worker) => worker.identifier)))].sort(), [data?.workerSnapshots])
+  const selectedEarned = useMemo(() => selectedWorker === 'all'
+    ? intervalAmount(data?.snapshots || [], windowRange.from, windowRange.to)
+    : workerIntervalAmount(data?.workerSnapshots || [], selectedWorker, windowRange.from, windowRange.to),
+  [selectedWorker, data?.snapshots, data?.workerSnapshots, windowRange.from, windowRange.to])
   const oneHourEarned = data?.latest && data.snapshots.length
     ? intervalAmount(data.snapshots, latestAt - 60 * 60 * 1000, latestAt)
     : 0n
@@ -254,21 +276,56 @@ function App() {
     : 0
   const chartData = useMemo(() => {
     const samples = data?.snapshots || []
-    const base = cumulativeAt(samples, windowRange.from)
-    if (base === null) return []
-    const points = [{ at: windowRange.from, earned: 0 }]
+    const workerSamples = data?.workerSnapshots || []
+    const baseCombined = cumulativeAt(samples, windowRange.from)
+    
+    const workerBases = new Map<string, bigint>()
+    for (const worker of workerIds) {
+      workerBases.set(worker, workerCumulativeAt(workerSamples, worker, windowRange.from) || 0n)
+    }
+
+    if (baseCombined === null) return []
+    
+    const initialPoint: any = { at: windowRange.from, earned: 0 }
+    for (const worker of workerIds) {
+      initialPoint[worker] = 0
+    }
+    const points = [initialPoint]
+
     for (const sample of samples) {
       const timestamp = Date.parse(sample.recordedAt)
       if (timestamp < windowRange.from || timestamp > windowRange.to) continue
-      const value = BigInt(sample.cumulativeAtomic) - base
-      points.push({ at: timestamp, earned: Number(value > 0n ? value : 0n) / Number(atomicScale) })
+      
+      const valCombined = BigInt(sample.cumulativeAtomic) - baseCombined
+      const point: any = { 
+        at: timestamp, 
+        earned: Number(valCombined > 0n ? valCombined : 0n) / Number(atomicScale) 
+      }
+
+      for (const worker of workerIds) {
+        const valWorker = (workerCumulativeAt(workerSamples, worker, timestamp) ?? 0n) - (workerBases.get(worker) ?? 0n)
+        point[worker] = Number(valWorker > 0n ? valWorker : 0n) / Number(atomicScale)
+      }
+      
+      points.push(point)
     }
+    
     if (points.length === 1 && data?.latest) {
-      const value = intervalAmount(samples, windowRange.from, windowRange.to)
-      points.push({ at: windowRange.to, earned: Number(value) / Number(atomicScale) })
+      const valCombined = intervalAmount(samples, windowRange.from, windowRange.to)
+      const point: any = { 
+        at: windowRange.to, 
+        earned: Number(valCombined) / Number(atomicScale) 
+      }
+      
+      for (const worker of workerIds) {
+        const valWorker = workerIntervalAmount(workerSamples, worker, windowRange.from, windowRange.to)
+        point[worker] = Number(valWorker) / Number(atomicScale)
+      }
+      
+      points.push(point)
     }
     return points
-  }, [data?.snapshots, data?.latest, windowRange.from, windowRange.to])
+  }, [data?.snapshots, data?.workerSnapshots, data?.latest, workerIds, windowRange.from, windowRange.to])
 
   const saveSettings = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -290,21 +347,7 @@ function App() {
     }
   }
 
-  const unlock = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    try {
-      await requestJson<void>('/api/access', {
-        method: 'POST',
-        body: JSON.stringify({ password: passwordInput }),
-      })
-      sessionStorage.setItem('dashboard-key', passwordInput)
-      setAccessKey(passwordInput)
-      setPasswordInput('')
-      setLocked(false)
-    } catch {
-      setError('That password was not accepted.')
-    }
-  }
+
 
   const chooseWindow = (next: WindowChoice) => {
     setChoice(next)
@@ -323,22 +366,7 @@ function App() {
     void refresh(windowRange.from, windowRange.to)
   }
 
-  if (locked) {
-    return (
-      <main className="access-screen">
-        <form className="access-form" onSubmit={unlock}>
-          <div className="brand-mark"><Zap size={19} /></div>
-          <p className="eyebrow">LOCAL MINING MONITOR</p>
-          <h1>Private dashboard</h1>
-          <p className="muted">Enter the dashboard password configured in your deployment secrets.</p>
-          <label className="field-label" htmlFor="access-password">Password</label>
-          <input id="access-password" autoFocus type="password" value={passwordInput} onChange={(event) => setPasswordInput(event.target.value)} />
-          {error && <p className="form-error">{error}</p>}
-          <button className="button button-primary button-wide" type="submit"><KeyRound size={16} /> Unlock dashboard</button>
-        </form>
-      </main>
-    )
-  }
+
 
   if (!loading && !data?.settings) {
     return (
@@ -398,7 +426,7 @@ function App() {
 
         <section className="earnings-layout">
           <div className="earnings-focus">
-            <div className="focus-topline"><span><Activity size={15} /> CREDITS IN INTERVAL</span><span className="asof">AS OF {formattedLatest}</span></div>
+            <div className="focus-topline"><span><Activity size={15} /> CREDITS IN INTERVAL</span><label className="worker-picker">VIEW <select aria-label="Choose combined or individual worker earnings" value={selectedWorker} onChange={(event) => setSelectedWorker(event.target.value)}><option value="all">Combined</option>{workerIds.map((worker) => <option key={worker} value={worker}>{worker}</option>)}</select></label><span className="asof">AS OF {formattedLatest}</span></div>
             <div className="focus-value"><span>{formatXmr(selectedEarned)}</span><em>XMR</em></div>
             <div className="focus-bottomline">
               <div className="rate-readout"><ArrowUpRight size={16} /><strong>{formatXmr(BigInt(Math.max(0, Math.round(hourlyRate * Number(atomicScale)))))}</strong><span>XMR / HR</span></div>
@@ -424,6 +452,15 @@ function App() {
           </div>
         </section>
 
+        <section className="worker-panel">
+          <div className="section-heading lower-heading"><div><p className="eyebrow">{activePeriodName.toUpperCase()}</p><h2>Earnings by miner</h2></div><span className="timezone-tag">COMBINED + WORKERS</span></div>
+          <div className="worker-earnings-grid">
+            <article className="worker-earning-card worker-total"><span>Combined</span><strong>{formatXmr(intervalAmount(data?.snapshots || [], windowRange.from, windowRange.to))}<small> XMR</small></strong></article>
+            {workerIds.map((worker) => <article className="worker-earning-card" key={worker}><span>{worker}</span><strong>{formatXmr(workerIntervalAmount(data?.workerSnapshots || [], worker, windowRange.from, windowRange.to))}<small> XMR</small></strong></article>)}
+            {!workerIds.length && <p className="worker-empty">Worker details appear after SupportXMR provides the first worker snapshot.</p>}
+          </div>
+        </section>
+
         <section className="chart-section">
           <div className="section-heading">
             <div><p className="eyebrow">CUMULATIVE POOL CREDIT</p><h2>{activePeriodName}</h2></div>
@@ -431,7 +468,7 @@ function App() {
           </div>
           <div className="chart-wrap">
             {chartData.length > 1 ? <Suspense fallback={<div className="chart-empty">Loading chart…</div>}>
-              <EarningsChart data={chartData} from={windowRange.from} to={windowRange.to} />
+              <EarningsChart data={chartData} from={windowRange.from} to={windowRange.to} workers={workerIds} />
             </Suspense> : <div className="chart-empty"><Activity size={19} /><span>{data?.latest ? 'More snapshots will shape this chart.' : 'Waiting for the first pool snapshot.'}</span></div>}
           </div>
           <div className="chart-foot"><span>INTERVAL START <strong>{new Date(windowRange.from).toLocaleString()}</strong></span><span>ESTIMATED RATE <strong>{formatXmr(BigInt(Math.max(0, Math.round(hourlyRate * Number(atomicScale)))))} XMR / HR</strong></span><span>COLLECTION EVERY 60 SEC</span></div>
