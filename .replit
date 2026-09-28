@@ -1,0 +1,6 @@
+run = "npm run dev"
+
+[deployment]
+build = "npm run build"
+run = "npm start"
+deploymentTarget = "cloudrun"
