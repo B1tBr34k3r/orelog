@@ -1,36 +1,48 @@
 # OreLog
 
-OreLog is a personal SupportXMR earnings dashboard. It polls the read-only miner stats endpoint once per minute, keeps a timestamped earnings log, and closes local-day records at midnight in the selected IANA timezone.
+OreLog is a local SupportXMR earnings monitor. It polls the read-only miner stats API once per minute, records cumulative paid-plus-pending XMR, and closes daily records at midnight in your selected timezone.
 
-## Run locally
+## Install on Android with Termux
 
-Requires Node.js 22 or newer.
+Install Termux from F-Droid or the official GitHub releases, then install the matching Termux:API add-on if you want to use its wake-lock command. Avoid the outdated Play Store build.
+
+The repository is private, so first sign in to GitHub in your Android browser and download the repository ZIP from the OreLog page. Then in Termux:
 
 ```sh
-npm install
-npm run dev
+termux-setup-storage
+pkg update && pkg upgrade
+pkg install nodejs-lts unzip
+cd ~
+unzip ~/storage/downloads/orelog-main.zip
+cd orelog-main
+npm ci
+npm run build
+npm start
 ```
 
-Open the Vite URL printed in the terminal. Without `DATABASE_URL`, the collector uses `data/records.json` for local development. Enter a standard Monero address and a timezone such as `America/New_York` or `Asia/Kolkata`. Logging begins with the first successful pool snapshot; the app cannot reconstruct earnings from before monitoring began.
+Open `http://127.0.0.1:3000` in the browser on that phone. Enter your Monero address and timezone once. The app writes its database to `data/records.json` in the project directory.
 
-## GitHub Pages + Replit
+## Keep it running
 
-GitHub Pages publishes the static dashboard UI. The Replit Reserved VM runs the collector and API continuously; Pages alone cannot run the collector or persist its database.
+Android may suspend or kill background apps, so phone-based collection is not guaranteed 24/7. In Android app settings, allow Termux unrestricted battery use, disable battery saver while collecting, keep the phone powered, and keep the Termux session running. With Termux:API installed, run `termux-wake-lock` in a second session to reduce sleep interruptions; use `termux-wake-unlock` when finished. A reboot, force-stop, network loss, or Android process kill creates a collection gap.
 
-1. Push this project to a GitHub repository whose default branch is `main`, then select **GitHub Actions** as the Pages source in repository settings.
-2. On Replit, add a PostgreSQL database and set its connection string as `DATABASE_URL`. Also set strong `DASHBOARD_PASSWORD` and `DASHBOARD_ALLOWED_ORIGIN` secrets. The allowed origin should be exactly `https://<owner>.github.io` (no repository path or trailing slash).
-3. Publish the Replit app as a **Reserved VM** using `npm run build` and `npm start`. Note its public API URL.
-4. In GitHub repository **Settings → Secrets and variables → Actions → Variables**, add `VITE_API_BASE_URL` with the Replit API URL, such as `https://your-app.replit.app`.
-5. Push to `main` or run the **Deploy Pages** workflow. The workflow builds and publishes the dashboard.
+The server binds to `127.0.0.1` by default, so the dashboard is only reachable from the phone itself. Do not change `HOST` to `0.0.0.0` unless you intend to expose it to your local network and have set `DASHBOARD_PASSWORD`.
 
-The workflow computes the correct project-page asset path automatically. PostgreSQL is required for durable collector storage; the local JSON fallback is for development only because deployment filesystems may not persist files.
+## Move existing history from the PC
 
-## Accounting notes
+The local history file is deliberately excluded from Git because it contains your wallet address and earnings. If you want to continue that history on the phone, securely copy the PC's `data/records.json` into `~/orelog-main/data/records.json` before starting OreLog. Do not upload this file to GitHub or share it publicly. If you do not copy it, monitoring starts with the first successful phone-side snapshot and cannot reconstruct earlier earnings.
 
-- Credited earnings are derived from changes in `amtPaid + amtDue`; a payout moving XMR from pending to paid does not count as a loss.
-- Pool values are reported asynchronously. The dashboard is current to the latest pool snapshot, not a per-share ledger. When a polling interval crosses midnight, that interval is proportionally split between the two days.
-- A gap longer than three polling intervals is flagged in the daily log and proportionally allocated. The affected period is an estimate, not a verified per-minute total.
-- Daily records stay open throughout the day and are finalized at the first poll after local midnight. Miner inactivity does not stop collection.
-- Snapshots are retained for 45 days; the dashboard shows the latest 31 daily records.
+Historical hashrate points are not currently imported into OreLog. Earnings are calculated from pool-reported `amtPaid + amtDue`, not estimated from hashrate. Payouts therefore move value from pending to paid without appearing as an earnings loss.
 
-The collector only calls `GET /api/miner/{address}/stats`. It does not call payout, threshold, notification, or Tari-address mutation endpoints.
+## Development on Termux
+
+To use the Vite development server instead of the built app, run `npm run dev` and open the printed local URL. Use `Ctrl+C` to stop it.
+
+## Data and accuracy
+
+- Snapshots are collected every 60 seconds and retained for 45 days; the dashboard shows the latest 31 daily records.
+- The first snapshot establishes a baseline and is not counted as newly earned XMR.
+- When a sample interval crosses local midnight, its earnings are proportionally split across the two days.
+- Gaps longer than three polls are flagged. Any earnings spanning a gap are allocated proportionally and are estimates, not verified per-minute totals.
+- The daily log stays open while the miner is idle and is finalized on the first successful poll after local midnight.
+- OreLog only calls `GET /api/miner/{address}/stats`; it does not trigger payouts or change pool settings.

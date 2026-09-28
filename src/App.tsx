@@ -52,7 +52,6 @@ type WindowChoice = 'hour' | 'day' | 'today' | 'custom'
 const atomicScale = 1_000_000_000_000n
 const defaultTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 const appStartedAt = Date.now()
-const apiBase = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 function formatXmr(value: string | bigint, digits = 8) {
   const amount = BigInt(value)
@@ -127,7 +126,7 @@ function intervalAmount(samples: Snapshot[], from: number, to: number) {
 }
 
 async function requestJson<T>(url: string, options: RequestInit = {}, accessKey = ''): Promise<T> {
-  const response = await fetch(`${apiBase}${url}`, {
+  const response = await fetch(url, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
