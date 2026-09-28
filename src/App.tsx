@@ -9,7 +9,6 @@ import {
   Clock3,
   Cpu,
   Database,
-  KeyRound,
   RefreshCw,
   Settings2,
   ShieldCheck,
@@ -20,6 +19,7 @@ import {
 import './App.css'
 
 const EarningsChart = lazy(() => import('./EarningsChart'))
+const DailyBarChart = lazy(() => import('./DailyBarChart'))
 
 type Snapshot = {
   recordedAt: string
@@ -183,39 +183,32 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [addressInput, setAddressInput] = useState('')
   const [timeZoneInput, setTimeZoneInput] = useState(defaultTimeZone)
-  const [passwordInput, setPasswordInput] = useState('')
-  const [accessKey, setAccessKey] = useState(() => sessionStorage.getItem('dashboard-key') || '')
-  const [locked, setLocked] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [clock, setClock] = useState(appStartedAt)
 
-
-
   const refresh = useCallback(async (startAt?: number, endAt?: number) => {
     try {
       const params = new URLSearchParams()
       if (startAt) params.set('from', String(startAt))
       if (endAt) params.set('to', String(endAt))
-      const result = await requestJson<DashboardData>(`/api/data?${params}`, {}, accessKey)
+      const result = await requestJson<DashboardData>(`/api/data?${params}`)
       setData(result)
       setAddressInput((current) => current || result.settings?.address || '')
       setTimeZoneInput(result.settings?.timeZone || defaultTimeZone)
       setError(result.collector.lastError || '')
-      setLocked(false)
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : 'Unable to load dashboard data.'
       setError(message)
-      if (message.includes('password')) setLocked(true)
     } finally {
       setLoading(false)
     }
-  }, [accessKey])
+  }, [])
 
   const refreshLatestPeriod = useEffectEvent(() => {
-    if (!locked) void refresh()
+    void refresh()
   })
 
   useEffect(() => {
@@ -252,13 +245,13 @@ function App() {
   }, [choice, customFrom, customTo, latestAt, clock, timeZone])
 
   const refreshSelectedRange = useEffectEvent(() => {
-    if (data?.latest && !locked) void refresh(windowRange.from, windowRange.to)
+    if (data?.latest) void refresh(windowRange.from, windowRange.to)
   })
 
   useEffect(() => {
     const timer = window.setTimeout(refreshSelectedRange, 0)
     return () => window.clearTimeout(timer)
-  }, [choice, customFrom, customTo, data?.latest?.recordedAt, locked])
+  }, [choice, customFrom, customTo, data?.latest?.recordedAt])
 
   const workerIds = useMemo(() => [...new Set((data?.workerSnapshots || []).flatMap((sample) => sample.workers.map((worker) => worker.identifier)))].sort(), [data?.workerSnapshots])
   const selectedEarned = useMemo(() => selectedWorker === 'all'
@@ -335,7 +328,7 @@ function App() {
       const response = await requestJson<{ reset: boolean }>('/api/settings', {
         method: 'PUT',
         body: JSON.stringify({ address: addressInput, timeZone: timeZoneInput }),
-      }, accessKey)
+      })
       setSettingsOpen(false)
       setNotice(response.reset ? 'Wallet or timezone changed. A new earnings log has started.' : 'Miner connected. Logging starts from the first pool snapshot.')
       await refresh()
@@ -477,6 +470,11 @@ function App() {
         <section className="lower-grid">
           <div className="daily-panel">
             <div className="section-heading lower-heading"><div><p className="eyebrow">LOCAL MIDNIGHT CLOSE</p><h2>Daily earnings</h2></div><span className="timezone-tag">{timeZone}</span></div>
+            {data?.days && data.days.length > 0 && (
+              <Suspense fallback={null}>
+                <DailyBarChart days={data.days} />
+              </Suspense>
+            )}
             <div className="daily-table-wrap">
               <table className="daily-table">
                 <thead><tr><th>DAY</th><th>EARNED</th><th>STATUS</th></tr></thead>
