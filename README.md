@@ -4,7 +4,7 @@ OreLog is a local SupportXMR earnings monitor. It polls the read-only miner stat
 
 ## Install on Android with Termux
 
-Install Termux from F-Droid or the official GitHub releases, then install the matching Termux:API add-on if you want to use its wake-lock command. Avoid the outdated Play Store build.
+Install Termux from F-Droid or the official GitHub releases. Avoid the outdated Play Store build. If you want wake-lock or boot support, install the matching Termux:API and Termux:Boot add-ons from the same source; in Termux run `pkg install termux-api` for the wake-lock command.
 
 The repository is private, so first sign in to GitHub in your Android browser and download the repository ZIP from the OreLog page. Then in Termux:
 
@@ -27,6 +27,17 @@ Open `http://127.0.0.1:3000` in the browser on that phone. Enter your Monero add
 Android may suspend or kill background apps, so phone-based collection is not guaranteed 24/7. In Android app settings, allow Termux unrestricted battery use, disable battery saver while collecting, keep the phone powered, and keep the Termux session running. With Termux:API installed, run `termux-wake-lock` in a second session to reduce sleep interruptions; use `termux-wake-unlock` when finished. A reboot, force-stop, network loss, or Android process kill creates a collection gap.
 
 The server binds to `127.0.0.1` by default, so the dashboard is only reachable from the phone itself. Do not change `HOST` to `0.0.0.0` unless you intend to expose it to your local network and have set `DASHBOARD_PASSWORD`.
+
+For optional startup after reboot, install Termux:Boot from the same source as Termux, open it once, then create `~/.termux/boot/start-orelog` with:
+
+```sh
+#!/data/data/com.termux/files/usr/bin/sh
+termux-wake-lock
+cd "$HOME/orelog-main"
+npm start >> "$HOME/orelog.log" 2>&1
+```
+
+Make it executable with `chmod +x ~/.termux/boot/start-orelog`. The phone must be unlocked after reboot for startup, and Android battery restrictions can still interrupt collection.
 
 ## Move existing history from the PC
 
