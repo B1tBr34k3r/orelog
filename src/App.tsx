@@ -9,9 +9,11 @@ import {
   Clock3,
   Cpu,
   Database,
+  Download,
   RefreshCw,
   Settings2,
   ShieldCheck,
+  Trash2,
   Wallet,
   X,
   Zap,
@@ -188,6 +190,38 @@ function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [clock, setClock] = useState(appStartedAt)
+  const [dialogTab, setDialogTab] = useState<'settings' | 'data'>('settings')
+  const [exportScope, setExportScope] = useState<'all' | 'today' | 'date'>('today')
+  const [exportDateInput, setExportDateInput] = useState(() => new Date().toISOString().slice(0, 10))
+  const [deleteScope, setDeleteScope] = useState<'today' | 'date' | 'all'>('today')
+  const [deleteDateInput, setDeleteDateInput] = useState(() => new Date().toISOString().slice(0, 10))
+  const [deleting, setDeleting] = useState(false)
+
+  const handleExport = (scope: 'all' | 'today' | 'date', date?: string) => {
+    const params = new URLSearchParams({ scope })
+    if (scope === 'date' && date) params.set('date', date)
+    window.open(`/api/export?${params.toString()}`, '_blank')
+  }
+
+  const handleDelete = async (scope: 'all' | 'today' | 'date', date?: string) => {
+    const label = scope === 'all' ? 'ALL historical earnings data' : scope === 'today' ? "today's collected data" : `data for ${date}`
+    if (!window.confirm(`Are you sure you want to permanently delete ${label}?`)) return
+    setDeleting(true)
+    setError('')
+    try {
+      await requestJson('/api/data', {
+        method: 'DELETE',
+        body: JSON.stringify({ scope, date }),
+      })
+      setNotice(`Deleted ${label} successfully.`)
+      await refresh()
+      window.setTimeout(() => setNotice(''), 6000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete data.')
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   const refresh = useCallback(async (startAt?: number, endAt?: number) => {
     try {
@@ -477,11 +511,17 @@ function App() {
             )}
             <div className="daily-table-wrap">
               <table className="daily-table">
-                <thead><tr><th>DAY</th><th>EARNED</th><th>STATUS</th></tr></thead>
+                <thead><tr><th>DAY</th><th>EARNED</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
                 <tbody>{(data?.days || []).slice(0, 8).map((day) => <tr key={day.dayKey}>
                   <td><span className="day-date">{day.dayKey}</span><small>{day.sampleCount.toLocaleString()} samples{day.gapCount > 0 ? ` · ${day.gapCount} gaps` : ''}</small></td>
                   <td className="daily-amount">{formatXmr(day.earnedAtomic)} <small>XMR</small></td>
                   <td><span className={`record-status ${day.finalized ? 'finalized' : 'recording'}`}><span />{day.finalized ? 'FINAL' : 'RECORDING'}</span></td>
+                  <td>
+                    <div className="table-actions">
+                      <button className="icon-action-button" title={`Export JSON for ${day.dayKey}`} onClick={() => handleExport('date', day.dayKey)}><Download size={13} /></button>
+                      <button className="icon-action-button action-danger" title={`Delete data for ${day.dayKey}`} onClick={() => handleDelete('date', day.dayKey)}><Trash2 size={13} /></button>
+                    </div>
+                  </td>
                 </tr>)}</tbody>
               </table>
               {!data?.days.length && <div className="table-empty">The daily log begins with your first pool snapshot.</div>}
@@ -504,16 +544,76 @@ function App() {
 
       {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false) }}>
         <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-          <div className="dialog-heading"><div><p className="eyebrow">MONITOR CONFIGURATION</p><h2 id="settings-title">Miner settings</h2></div><button className="icon-button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}><X size={18} /></button></div>
-          <form className="setup-form" onSubmit={saveSettings}>
-            <label className="field-label" htmlFor="settings-address">Monero wallet address</label>
-            <input id="settings-address" autoComplete="off" spellCheck={false} value={addressInput} onChange={(event) => setAddressInput(event.target.value)} required />
-            <label className="field-label" htmlFor="settings-timezone">Daily log timezone</label>
-            <input id="settings-timezone" value={timeZoneInput} onChange={(event) => setTimeZoneInput(event.target.value)} required />
-            <p className="settings-warning"><AlertTriangle size={15} /> Changing the wallet or timezone clears this local earnings history and starts a new log.</p>
-            {error && <p className="form-error">{error}</p>}
-            <div className="dialog-actions"><button className="button button-quiet" type="button" onClick={() => setSettingsOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button></div>
-          </form>
+          <div className="dialog-heading">
+            <div>
+              <p className="eyebrow">DASHBOARD & DATA</p>
+              <h2 id="settings-title">{dialogTab === 'settings' ? 'Miner settings' : 'Data management'}</h2>
+            </div>
+            <button className="icon-button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}><X size={18} /></button>
+          </div>
+
+          <div className="dialog-tabs">
+            <button type="button" className={`tab-button ${dialogTab === 'settings' ? 'active' : ''}`} onClick={() => setDialogTab('settings')}>Configuration</button>
+            <button type="button" className={`tab-button ${dialogTab === 'data' ? 'active' : ''}`} onClick={() => setDialogTab('data')}>Backup & Delete</button>
+          </div>
+
+          {dialogTab === 'settings' ? (
+            <form className="setup-form" onSubmit={saveSettings}>
+              <label className="field-label" htmlFor="settings-address">Monero wallet address</label>
+              <input id="settings-address" autoComplete="off" spellCheck={false} value={addressInput} onChange={(event) => setAddressInput(event.target.value)} required />
+              <label className="field-label" htmlFor="settings-timezone">Daily log timezone</label>
+              <input id="settings-timezone" value={timeZoneInput} onChange={(event) => setTimeZoneInput(event.target.value)} required />
+              <p className="settings-warning"><AlertTriangle size={15} /> Changing the wallet or timezone clears this local earnings history and starts a new log.</p>
+              {error && <p className="form-error">{error}</p>}
+              <div className="dialog-actions">
+                <button className="button button-quiet" type="button" onClick={() => setSettingsOpen(false)}>Cancel</button>
+                <button className="button button-primary" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button>
+              </div>
+            </form>
+          ) : (
+            <div className="data-mgmt-section">
+              <div className="data-mgmt-card">
+                <h3><Download size={15} /> Save / Export Data (JSON)</h3>
+                <p>Download a gapless JSON backup of your balance snapshots and daily earnings records.</p>
+                <div className="mgmt-controls">
+                  <select value={exportScope} onChange={(e) => setExportScope(e.target.value as any)}>
+                    <option value="today">Today's Data</option>
+                    <option value="date">Specific Date</option>
+                    <option value="all">All History</option>
+                  </select>
+                  {exportScope === 'date' && (
+                    <input type="date" value={exportDateInput} onChange={(e) => setExportDateInput(e.target.value)} />
+                  )}
+                  <button type="button" className="button button-primary" onClick={() => handleExport(exportScope, exportDateInput)}>
+                    <Download size={14} /> Download JSON
+                  </button>
+                </div>
+              </div>
+
+              <div className="data-mgmt-card">
+                <h3><Trash2 size={15} /> Delete Collected Data</h3>
+                <p>Permanently remove recorded snapshots from the database. Useful for clearing test runs or specific dates.</p>
+                <div className="mgmt-controls">
+                  <select value={deleteScope} onChange={(e) => setDeleteScope(e.target.value as any)}>
+                    <option value="today">Today's Data</option>
+                    <option value="date">Specific Date</option>
+                    <option value="all">All History</option>
+                  </select>
+                  {deleteScope === 'date' && (
+                    <input type="date" value={deleteDateInput} onChange={(e) => setDeleteDateInput(e.target.value)} />
+                  )}
+                  <button type="button" className="button button-danger" disabled={deleting} onClick={() => handleDelete(deleteScope, deleteDateInput)}>
+                    <Trash2 size={14} /> {deleting ? 'Deleting…' : 'Delete Data'}
+                  </button>
+                </div>
+              </div>
+
+              {error && <p className="form-error">{error}</p>}
+              <div className="dialog-actions">
+                <button className="button button-quiet" type="button" onClick={() => setSettingsOpen(false)}>Close</button>
+              </div>
+            </div>
+          )}
         </section>
       </div>}
     </div>

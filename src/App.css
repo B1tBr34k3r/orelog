@@ -221,3 +221,22 @@ input[type="datetime-local"] { color-scheme: dark; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.dialog-tabs { display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.tab-button { padding: 6px 12px; background: transparent; border: 1px solid transparent; color: var(--dim); font: 12px/1 var(--mono); cursor: pointer; border-radius: 2px; }
+.tab-button.active { background: #20271f; border-color: #414a3d; color: var(--bright); }
+.tab-button:hover:not(.active) { color: var(--text); }
+.data-mgmt-section { display: grid; gap: 16px; margin-top: 10px; }
+.data-mgmt-card { padding: 14px; border: 1px solid var(--line); background: #181f18; border-radius: 3px; }
+.data-mgmt-card h3 { margin: 0 0 6px; font-size: 13px; color: var(--bright); font-family: var(--display); display: flex; align-items: center; gap: 7px; }
+.data-mgmt-card p { margin: 0 0 10px; font-size: 11px; color: var(--dim); }
+.mgmt-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.mgmt-controls select, .mgmt-controls input[type="date"] { padding: 7px 10px; background: #0f140f; border: 1px solid var(--line); color: var(--bright); font: 11px var(--mono); border-radius: 2px; outline: none; }
+.mgmt-controls select:focus, .mgmt-controls input[type="date"]:focus { border-color: var(--acid); }
+.button-danger { background: #d33c3c; color: #fff; border: 1px solid #ff5a5a; font-weight: 500; }
+.button-danger:hover:not(:disabled) { background: #e84c4c; }
+.table-actions { display: flex; gap: 6px; justify-content: flex-end; align-items: center; }
+.icon-action-button { padding: 5px; background: transparent; border: 1px solid var(--line); color: var(--dim); cursor: pointer; border-radius: 2px; display: inline-flex; align-items: center; justify-content: center; }
+.icon-action-button:hover { color: var(--bright); border-color: #68745e; background: #1c241c; }
+.icon-action-button.action-danger:hover { color: #ff6b6b; border-color: #933; background: #2c1414; }
+

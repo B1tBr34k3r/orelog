@@ -147,6 +147,59 @@ class JsonlStore {
   async recentDays(limit = 31) {
     return [...this.memory.days].sort((a, b) => b.dayKey.localeCompare(a.dayKey)).slice(0, limit)
   }
+
+  async deleteData(from, to, dayKey, isAll) {
+    if (isAll) {
+      this.memory.snapshots = []
+      this.memory.workerSnapshots = []
+      this.memory.days = []
+      await writeFile(path.join(this.dir, 'snapshots.jsonl'), '')
+      await writeFile(path.join(this.dir, 'worker_snapshots.jsonl'), '')
+      await writeFile(path.join(this.dir, 'days.json'), '[]')
+      return
+    }
+    if (from !== undefined && to !== undefined) {
+      this.memory.snapshots = this.memory.snapshots.filter((s) => {
+        const at = Date.parse(s.recordedAt)
+        return at < from || at > to
+      })
+      this.memory.workerSnapshots = this.memory.workerSnapshots.filter((s) => {
+        const at = Date.parse(s.recordedAt)
+        return at < from || at > to
+      })
+      await writeFile(path.join(this.dir, 'snapshots.jsonl'), this.memory.snapshots.map((s) => JSON.stringify(s) + '\n').join(''))
+      await writeFile(path.join(this.dir, 'worker_snapshots.jsonl'), this.memory.workerSnapshots.map((s) => JSON.stringify(s) + '\n').join(''))
+    }
+    if (dayKey) {
+      this.memory.days = this.memory.days.filter((d) => d.dayKey !== dayKey)
+      await this.saveDays()
+    }
+  }
+
+  async getExportData(from, to, dayKey, isAll) {
+    let snapshots = this.memory.snapshots
+    let workerSnapshots = this.memory.workerSnapshots
+    let days = this.memory.days
+    if (!isAll && from !== undefined && to !== undefined) {
+      snapshots = snapshots.filter((s) => {
+        const at = Date.parse(s.recordedAt)
+        return at >= from && at <= to
+      })
+      workerSnapshots = workerSnapshots.filter((s) => {
+        const at = Date.parse(s.recordedAt)
+        return at >= from && at <= to
+      })
+    }
+    if (!isAll && dayKey) {
+      days = days.filter((d) => d.dayKey === dayKey)
+    }
+    return {
+      settings: this.memory.settings,
+      snapshots,
+      workerSnapshots,
+      days,
+    }
+  }
 }
 
 class PostgresStore {
@@ -323,6 +376,71 @@ class PostgresStore {
       lastAt: row.last_at ? new Date(row.last_at).toISOString() : null,
       finalized: row.finalized,
     }))
+  }
+
+  async deleteData(from, to, dayKey, isAll) {
+    if (isAll) {
+      await this.pool.query('TRUNCATE snapshots, worker_snapshots, daily_records')
+      return
+    }
+    if (from !== undefined && to !== undefined) {
+      const fromDate = new Date(from)
+      const toDate = new Date(to)
+      await this.pool.query('DELETE FROM snapshots WHERE recorded_at >= $1 AND recorded_at <= $2', [fromDate, toDate])
+      await this.pool.query('DELETE FROM worker_snapshots WHERE recorded_at >= $1 AND recorded_at <= $2', [fromDate, toDate])
+    }
+    if (dayKey) {
+      await this.pool.query('DELETE FROM daily_records WHERE day_key = $1', [dayKey])
+    }
+  }
+
+  async getExportData(from, to, dayKey, isAll) {
+    let snapQuery = 'SELECT * FROM snapshots ORDER BY recorded_at'
+    let snapParams = []
+    let workerQuery = 'SELECT * FROM worker_snapshots ORDER BY recorded_at'
+    let workerParams = []
+    let dayQuery = 'SELECT * FROM daily_records ORDER BY day_key'
+    let dayParams = []
+
+    if (!isAll && from !== undefined && to !== undefined) {
+      snapQuery = 'SELECT * FROM snapshots WHERE recorded_at >= $1 AND recorded_at <= $2 ORDER BY recorded_at'
+      snapParams = [new Date(from), new Date(to)]
+      workerQuery = 'SELECT * FROM worker_snapshots WHERE recorded_at >= $1 AND recorded_at <= $2 ORDER BY recorded_at'
+      workerParams = [new Date(from), new Date(to)]
+    }
+    if (!isAll && dayKey) {
+      dayQuery = 'SELECT * FROM daily_records WHERE day_key = $1'
+      dayParams = [dayKey]
+    }
+
+    const [settings, snapRes, workerRes, dayRes] = await Promise.all([
+      this.getSettings(),
+      this.pool.query(snapQuery, snapParams),
+      this.pool.query(workerQuery, workerParams),
+      this.pool.query(dayQuery, dayParams),
+    ])
+
+    const groupedWorkers = new Map()
+    for (const row of workerRes.rows) {
+      const at = new Date(row.recorded_at).toISOString()
+      if (!groupedWorkers.has(at)) groupedWorkers.set(at, { recordedAt: at, workers: [] })
+      groupedWorkers.get(at).workers.push({ identifier: row.identifier, cumulativeAtomic: String(row.cumulative_atomic) })
+    }
+
+    return {
+      settings,
+      snapshots: snapRes.rows.map((r) => this.mapSnapshot(r)),
+      workerSnapshots: [...groupedWorkers.values()],
+      days: dayRes.rows.map((r) => ({
+        dayKey: r.day_key,
+        earnedAtomic: String(r.earned_atomic),
+        sampleCount: r.sample_count,
+        gapCount: r.gap_count,
+        firstAt: r.first_at ? new Date(r.first_at).toISOString() : null,
+        lastAt: r.last_at ? new Date(r.last_at).toISOString() : null,
+        finalized: r.finalized,
+      })),
+    }
   }
 }
 
@@ -512,6 +630,66 @@ app.put('/api/settings', async (request, response) => {
     response.json({ ok: true, reset })
   } catch (error) {
     response.status(500).json({ error: error.message || 'Unable to save settings' })
+  }
+})
+
+app.get('/api/export', async (request, response) => {
+  try {
+    const scope = String(request.query.scope || 'all')
+    const date = request.query.date ? String(request.query.date) : null
+    const settings = await store.getSettings()
+    const tz = settings?.timeZone || 'UTC'
+
+    let from, to, dayKey, isAll = false
+    if (scope === 'all') {
+      isAll = true
+    } else if (scope === 'today') {
+      dayKey = timeZoneDayKey(Date.now(), tz)
+      from = dayStartTimestamp(dayKey, tz)
+      to = dayStartTimestamp(nextDayKey(dayKey), tz) - 1
+    } else if (scope === 'date' && date) {
+      dayKey = date
+      from = dayStartTimestamp(dayKey, tz)
+      to = dayStartTimestamp(nextDayKey(dayKey), tz) - 1
+    } else {
+      return response.status(400).json({ error: 'Invalid scope or date' })
+    }
+
+    const exportData = await store.getExportData(from, to, dayKey, isAll)
+    const filename = `orelog-${scope}${date ? `-${date}` : ''}-${Date.now()}.json`
+    response.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    response.setHeader('Content-Type', 'application/json')
+    response.send(JSON.stringify({ exportedAt: new Date().toISOString(), scope, date, ...exportData }, null, 2))
+  } catch (error) {
+    response.status(500).json({ error: error.message || 'Export failed' })
+  }
+})
+
+app.delete('/api/data', async (request, response) => {
+  try {
+    const { scope, date } = request.body || {}
+    const settings = await store.getSettings()
+    const tz = settings?.timeZone || 'UTC'
+
+    let from, to, dayKey, isAll = false
+    if (scope === 'all') {
+      isAll = true
+    } else if (scope === 'today') {
+      dayKey = timeZoneDayKey(Date.now(), tz)
+      from = dayStartTimestamp(dayKey, tz)
+      to = dayStartTimestamp(nextDayKey(dayKey), tz) - 1
+    } else if (scope === 'date' && date) {
+      dayKey = date
+      from = dayStartTimestamp(dayKey, tz)
+      to = dayStartTimestamp(nextDayKey(dayKey), tz) - 1
+    } else {
+      return response.status(400).json({ error: 'Invalid scope or date' })
+    }
+
+    await store.deleteData(from, to, dayKey, isAll)
+    response.json({ ok: true, scope, date })
+  } catch (error) {
+    response.status(500).json({ error: error.message || 'Delete failed' })
   }
 })
 
