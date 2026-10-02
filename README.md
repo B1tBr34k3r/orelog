@@ -1,59 +1,150 @@
-# OreLog
+<div align="center">
 
-OreLog is a local SupportXMR earnings monitor. It polls the read-only miner stats API once per minute, records cumulative paid-plus-pending XMR, and closes daily records at midnight in your selected timezone.
+# ⚡ ORELOG
 
-## Install on Android with Termux
+### **High-Precision, Privacy-First Monero (XMR) Mining Monitor & Earnings Dashboard**
 
-Install Termux from F-Droid or the official GitHub releases. Avoid the outdated Play Store build. If you want wake-lock or boot support, install the matching Termux:API and Termux:Boot add-ons from the same source; in Termux run `pkg install termux-api` for the wake-lock command.
+[![Node.js](https://img.shields.io/badge/Node.js-v20+-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Vite](https://img.shields.io/badge/Vite-8-646CFF?style=for-the-badge&logo=vite&logoColor=white)](https://vitejs.dev)
+[![Monero](https://img.shields.io/badge/Monero-XMR-FF6600?style=for-the-badge&logo=monero&logoColor=white)](https://getmonero.org)
+[![License](https://img.shields.io/badge/License-MIT-acid?style=for-the-badge)](LICENSE)
 
-The repository is private, so first sign in to GitHub in your Android browser and download the repository ZIP from the OreLog page. Then in Termux:
+<p align="center">
+  <b>Self-hosted, gapless earnings analytics, live active miner telemetry, and zero-cost real-time fiat valuation (USD & INR).</b>
+</p>
 
-```sh
+---
+
+</div>
+
+## 🌟 Highlights
+
+- 🪙 **True Balance Tracking:** Tracks cumulative pool rewards (`amtPaid` + `amtDue`) so payout events never appear as earning drops.
+- 💵 **Real-Time Dual Fiat Conversion:** Instant live pricing in **USD ($)** and **INR (₹)** with dual API redundancy (CoinGecko & CoinPaprika) and smart caching (zero API keys needed).
+- ⛏️ **Active Miner Telemetry:** Real-time worker cards showing live status badges (`MINING` vs `IDLE`), current hashrates ($H/s$, $KH/s$, $MH/s$), and last share latency.
+- 📈 **Interactive Interval Analysis:** View earnings over **1 Hour**, **24 Hours**, **Today** (since local midnight), or custom intervals with instant hourly rate projections.
+- 🕒 **Timezone-Aware Daily Accounting:** Automatically splits and finalizes daily earnings at local midnight, allocating network gaps proportionally.
+- 🔒 **100% Read-Only & Private:** Only calls public pool stats endpoints. No private keys, no seed phrases, no transaction capabilities.
+- 💾 **Data Ownership & Backup:** Single-click JSON exports by day or full history, with selective database pruning tools.
+- 🚀 **Universal Deployment:** Runs effortlessly on **Cloud VPS** (Oracle Cloud, DigitalOcean, AWS), **Shared Hosting / PHP** (InfinityFree, cPanel), **Docker**, or **Android / Termux**.
+
+---
+
+## 📸 Dashboard Overview
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│  ⚡ ORELOG   /  SUPPORTXMR · MONERO   [1 XMR ≈ $549.60 · ₹52,810]  [COLLECTING ●] │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  CREDITS IN INTERVAL (LAST 24 HOURS)                TODAY · MIDNIGHT RESET       │
+│  0.01428500 XMR                                     0.00892000 XMR               │
+│  ≈ $7.85 · ₹754.40                                  ≈ $4.90 · ₹471.10            │
+│  ↗ 0.00059520 XMR/HR  (≈ $0.33/hr · ₹31.43/hr)                                  │
+│                                                     PENDING POOL BALANCE         │
+│  [1H] [24H] [TODAY] [CUSTOM]                        0.02923137 XMR               │
+│                                                     ≈ $16.06 · ₹1,543.80         │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  ACTIVE MINERS · 2 MINING NOW                                                    │
+│  ┌───────────────────────────────┐   ┌───────────────────────────────┐           │
+│  │ 💻 rig-epyc        [MINING ●] │   │ 💻 desktop-ryzen   [MINING ●] │           │
+│  │ 14.85 KH/s · Last share 12s   │   │ 4.20 KH/s · Last share 38s    │           │
+│  └───────────────────────────────┘   └───────────────────────────────┘           │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  CUMULATIVE POOL CREDIT (CHART)                     DAILY EARNINGS LEDGER        │
+│  [──────────────────────────────]                   2026-10-02   0.008920 XMR    │
+│                                                     2026-10-01   0.015400 XMR    │
+│                                                     2026-09-30   0.014890 XMR    │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🚀 Quickstart & Deployment
+
+### Option 1: Linux / Cloud VPS (Recommended)
+*Ideal for Oracle Cloud Free Tier, DigitalOcean, AWS EC2, or a home server.*
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/B1tBr34k3r/orelog.git
+cd orelog
+
+# 2. Install dependencies & build UI
+npm install
+npm run build
+
+# 3. Start with PM2 (runs 24/7 in background)
+npm install -g pm2
+pm2 start server/index.mjs --name "orelog"
+pm2 save
+pm2 startup
+```
+
+Open `http://<your-server-ip>:3000` in your browser. Enter your Monero wallet address and timezone on first setup.
+
+---
+
+### Option 2: Shared Hosting / PHP (InfinityFree, Apache, cPanel)
+*Zero server management required.*
+
+1. Run `npm run build` locally.
+2. Upload the contents of `dist/` and `api/` to your host's web root (`htdocs/` or `public_html/`).
+3. Set your MySQL credentials in `api/config.php`.
+4. Open your domain in any browser to begin monitoring.
+
+---
+
+### Option 3: Local Development
+
+```bash
+# Start backend and Vite dev server with hot reload
+npm run dev
+```
+
+Visit `http://localhost:5173` (Vite) or `http://localhost:3000` (API Server).
+
+---
+
+### Option 4: Android (via Termux)
+
+```bash
 termux-setup-storage
-pkg update && pkg upgrade
-pkg install nodejs-lts unzip
-cd ~
-unzip ~/storage/downloads/orelog-main.zip
-cd orelog-main
-npm ci
+pkg update && pkg install nodejs-lts git
+git clone https://github.com/B1tBr34k3r/orelog.git
+cd orelog
+npm install
 npm run build
 npm start
 ```
+Open `http://127.0.0.1:3000` in your mobile browser.
 
-Open `http://127.0.0.1:3000` in the browser on that phone. Enter your Monero address and timezone once. The app writes its database to `data/records.json` in the project directory.
+---
 
-## Keep it running
+## ⚙️ How OreLog Calculates Earnings
 
-Android may suspend or kill background apps, so phone-based collection is not guaranteed 24/7. In Android app settings, allow Termux unrestricted battery use, disable battery saver while collecting, keep the phone powered, and keep the Termux session running. With Termux:API installed, run `termux-wake-lock` in a second session to reduce sleep interruptions; use `termux-wake-unlock` when finished. A reboot, force-stop, network loss, or Android process kill creates a collection gap.
+Monero pools utilize **PPLNS (Pay Per Last N Shares)**. When blocks are found, rewards are credited to your account balance (`amtDue`). When payout thresholds are reached, funds transfer to `amtPaid`.
 
-The server binds to `127.0.0.1` by default, so the dashboard is only reachable from the phone itself. Do not change `HOST` to `0.0.0.0` unless you intend to expose it to your local network and have set `DASHBOARD_PASSWORD`.
+OreLog computes true earnings using cumulative balance snapshots:
+$$\text{Cumulative XMR} = \text{amtPaid} + \text{amtDue}$$
+$$\Delta \text{Earned} = \text{Cumulative}_{\text{current}} - \text{Cumulative}_{\text{previous}}$$
 
-For optional startup after reboot, install Termux:Boot from the same source as Termux, open it once, then create `~/.termux/boot/start-orelog` with:
+- **Gap Protection:** If monitoring stops temporarily (e.g. server restart), delta earnings across the gap are allocated proportionally across day boundaries.
+- **Real-Time Fiat:** Fiat approximations evaluate $\Delta \text{Earned} \times \text{Spot Price}$, updated every 5 minutes from CoinGecko / CoinPaprika.
 
-```sh
-#!/data/data/com.termux/files/usr/bin/sh
-termux-wake-lock
-cd "$HOME/orelog-main"
-npm start >> "$HOME/orelog.log" 2>&1
-```
+---
 
-Make it executable with `chmod +x ~/.termux/boot/start-orelog`. The phone must be unlocked after reboot for startup, and Android battery restrictions can still interrupt collection.
+## 🛠️ Tech Stack
 
-## Move existing history from the PC
+- **Frontend:** React 19, TypeScript, Vite, Recharts, Lucide Icons, Vanilla CSS Grid/Flexbox
+- **Backend (Node):** Express, Pure-JS JSONL streaming store / PostgreSQL engine
+- **Backend (PHP):** PHP 8.x + PDO SQLite/MySQL fallback engine
+- **Price Feeds:** CoinGecko API & CoinPaprika REST API (dual-fallback with TTL cache)
 
-The local history file is deliberately excluded from Git because it contains your wallet address and earnings. If you want to continue that history on the phone, securely copy the PC's `data/records.json` into `~/orelog-main/data/records.json` before starting OreLog. Do not upload this file to GitHub or share it publicly. If you do not copy it, monitoring starts with the first successful phone-side snapshot and cannot reconstruct earlier earnings.
+---
 
-Historical hashrate points are not currently imported into OreLog. Earnings are calculated from pool-reported `amtPaid + amtDue`, not estimated from hashrate. Payouts therefore move value from pending to paid without appearing as an earnings loss.
+## 📄 License
 
-## Development on Termux
-
-To use the Vite development server instead of the built app, run `npm run dev` and open the printed local URL. Use `Ctrl+C` to stop it.
-
-## Data and accuracy
-
-- Snapshots are collected every 60 seconds and retained for 45 days; the dashboard shows the latest 31 daily records.
-- The first snapshot establishes a baseline and is not counted as newly earned XMR.
-- When a sample interval crosses local midnight, its earnings are proportionally split across the two days.
-- Gaps longer than three polls are flagged. Any earnings spanning a gap are allocated proportionally and are estimates, not verified per-minute totals.
-- The daily log stays open while the miner is idle and is finalized on the first successful poll after local midnight.
-- OreLog only calls `GET /api/miner/{address}/stats`; it does not trigger payouts or change pool settings.
+This project is licensed under the [MIT License](LICENSE).
