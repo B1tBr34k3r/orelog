@@ -139,6 +139,9 @@ if ($durationMs > 86400000) {
     $workerSnapshots = downsampleWorkers($workerSnapshots, $bucketMs);
 }
 
+// Fiat conversion rates
+$fiat = getFiatRates($db);
+
 echo json_encode([
     'settings'        => $settingsOut,
     'latest'          => formatSnapshot($latest),
@@ -146,6 +149,7 @@ echo json_encode([
     'workers'         => $activeWorkers,
     'workerSnapshots' => $workerSnapshots,
     'days'            => array_map('formatDay', $days),
+    'fiat'            => $fiat,
     'collector'       => [
         'lastPollAt' => $pollState['last_poll_at'] ?? null,
         'lastError'  => $pollState['last_error'] ?? null,

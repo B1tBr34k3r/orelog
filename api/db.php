@@ -80,16 +80,22 @@ function ensureSchema(PDO $pdo): void {
             id INT PRIMARY KEY DEFAULT 1,
             last_poll_at DATETIME,
             last_error TEXT,
-            active_workers TEXT
+            active_workers TEXT,
+            fiat_rates TEXT,
+            fiat_fetched_at DATETIME
         ) ENGINE=InnoDB;
     ");
 
-    // Add active_workers column if upgrading an existing database
+    // Add columns if upgrading an existing database
     try {
         $pdo->exec("ALTER TABLE poll_state ADD COLUMN active_workers TEXT");
-    } catch (Exception $e) {
-        // Column already exists
-    }
+    } catch (Exception $e) {}
+    try {
+        $pdo->exec("ALTER TABLE poll_state ADD COLUMN fiat_rates TEXT");
+    } catch (Exception $e) {}
+    try {
+        $pdo->exec("ALTER TABLE poll_state ADD COLUMN fiat_fetched_at DATETIME");
+    } catch (Exception $e) {}
 
     // Ensure poll_state row exists
     $pdo->exec("INSERT IGNORE INTO poll_state (id) VALUES (1)");

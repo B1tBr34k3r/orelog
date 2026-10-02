@@ -258,6 +258,82 @@ function doPoll(PDO $db): array {
     return ['ok' => true, 'recordedAt' => $now];
 }
 
+// ---------- Fiat currency conversion ----------
+
+/**
+ * Get current XMR prices in USD and INR with a 5-minute cache.
+ */
+function getFiatRates(PDO $db): array {
+    $ps = $db->query("SELECT fiat_rates, fiat_fetched_at FROM poll_state WHERE id = 1")->fetch();
+    $now = time();
+    if ($ps && !empty($ps['fiat_rates']) && !empty($ps['fiat_fetched_at'])) {
+        $elapsed = $now - strtotime($ps['fiat_fetched_at']);
+        if ($elapsed < 300) {
+            $cached = json_decode($ps['fiat_rates'], true);
+            if (!empty($cached['usd']) && !empty($cached['inr'])) {
+                return $cached;
+            }
+        }
+    }
+
+    $fiat = ['usd' => 0, 'inr' => 0];
+
+    // 1. Try CoinGecko
+    $ch = curl_init('https://api.coingecko.com/api/v3/simple/price?ids=monero&vs_currencies=usd,inr');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 6,
+        CURLOPT_CONNECTTIMEOUT => 4,
+        CURLOPT_USERAGENT      => 'OreLog/1.0',
+    ]);
+    $res = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($res && $code === 200) {
+        $data = json_decode($res, true);
+        if (!empty($data['monero']['usd']) && !empty($data['monero']['inr'])) {
+            $fiat = [
+                'usd' => (float)$data['monero']['usd'],
+                'inr' => (float)$data['monero']['inr'],
+            ];
+        }
+    }
+
+    // 2. Fallback to CoinPaprika
+    if (empty($fiat['usd'])) {
+        $ch = curl_init('https://api.coinpaprika.com/v1/tickers/xmr-monero?quotes=USD,INR');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 6,
+            CURLOPT_CONNECTTIMEOUT => 4,
+            CURLOPT_USERAGENT      => 'OreLog/1.0',
+        ]);
+        $res = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($res && $code === 200) {
+            $data = json_decode($res, true);
+            if (!empty($data['quotes']['USD']['price']) && !empty($data['quotes']['INR']['price'])) {
+                $fiat = [
+                    'usd' => (float)$data['quotes']['USD']['price'],
+                    'inr' => (float)$data['quotes']['INR']['price'],
+                ];
+            }
+        }
+    }
+
+    if (!empty($fiat['usd'])) {
+        $db->prepare("UPDATE poll_state SET fiat_rates = ?, fiat_fetched_at = ? WHERE id = 1")
+           ->execute([json_encode($fiat), gmdate('Y-m-d H:i:s')]);
+    } elseif ($ps && !empty($ps['fiat_rates'])) {
+        $fiat = json_decode($ps['fiat_rates'], true) ?: $fiat;
+    }
+
+    return $fiat;
+}
+
 // ---------- Response formatters ----------
 
 /**

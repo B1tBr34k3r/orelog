@@ -47,17 +47,24 @@ type DailyRecord = {
   finalized: boolean
 }
 
+type FiatRates = {
+  usd: number
+  inr: number
+}
+
 type DashboardData = {
   settings: { address: string; timeZone: string } | null
   latest: Snapshot | null
   snapshots: Snapshot[]
   workers?: ActiveWorker[]
   days: DailyRecord[]
+  fiat?: FiatRates | null
   collector: { lastPollAt: string | null; lastError: string | null; isPolling: boolean }
   serverTime: string
 }
 
 type WindowChoice = 'hour' | 'day' | 'today' | 'custom'
+type FiatPref = 'both' | 'usd' | 'inr'
 
 const atomicScale = 1_000_000_000_000n
 const defaultTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -81,6 +88,37 @@ function formatHashrate(h: number) {
   if (h >= 1_000_000) return `${(h / 1_000_000).toFixed(2)} MH/s`
   if (h >= 1_000) return `${(h / 1_000).toFixed(1)} KH/s`
   return `${h.toLocaleString()} H/s`
+}
+
+function formatFiat(
+  atomic: string | bigint,
+  fiat?: FiatRates | null,
+  pref: FiatPref = 'both',
+  perHour = false
+): string | null {
+  if (!fiat || (!fiat.usd && !fiat.inr)) return null
+  const xmr = Number(BigInt(atomic)) / Number(atomicScale)
+  if (xmr < 0) return null
+
+  const usd = xmr * (fiat.usd || 0)
+  const inr = xmr * (fiat.inr || 0)
+
+  const formatVal = (val: number, symbol: string) => {
+    if (val === 0) return `${symbol}0.00`
+    if (val < 0.01) return `${symbol}${val.toFixed(4)}`
+    return `${symbol}${val.toLocaleString(symbol === '₹' ? 'en-IN' : 'en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`
+  }
+
+  const suffix = perHour ? '/hr' : ''
+  const usdStr = `${formatVal(usd, '$')}${suffix}`
+  const inrStr = `${formatVal(inr, '₹')}${suffix}`
+
+  if (pref === 'usd') return usdStr
+  if (pref === 'inr') return inrStr
+  return `${usdStr} · ${inrStr}`
 }
 
 function localDayKey(timestamp: number, timeZone: string) {
@@ -164,6 +202,7 @@ function App() {
   const [choice, setChoice] = useState<WindowChoice>('day')
   const [customFrom, setCustomFrom] = useState(() => localInput(appStartedAt - 60 * 60 * 1000))
   const [customTo, setCustomTo] = useState(() => localInput(appStartedAt))
+  const [fiatPref, setFiatPref] = useState<FiatPref>(() => (localStorage.getItem('orelog_fiat_pref') as FiatPref) || 'both')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [addressInput, setAddressInput] = useState('')
   const [timeZoneInput, setTimeZoneInput] = useState(defaultTimeZone)
@@ -178,6 +217,14 @@ function App() {
   const [deleteScope, setDeleteScope] = useState<'today' | 'date' | 'all'>('today')
   const [deleteDateInput, setDeleteDateInput] = useState(() => new Date().toISOString().slice(0, 10))
   const [deleting, setDeleting] = useState(false)
+
+  const cycleFiatPref = () => {
+    setFiatPref((current) => {
+      const next = current === 'both' ? 'usd' : current === 'usd' ? 'inr' : 'both'
+      localStorage.setItem('orelog_fiat_pref', next)
+      return next
+    })
+  }
 
   const handleExport = (scope: 'all' | 'today' | 'date', date?: string) => {
     const params = new URLSearchParams({ scope })
@@ -292,6 +339,7 @@ function App() {
   const hourlyRate = windowRange.to > windowRange.from
     ? Number(intervalEarned) / Number(atomicScale) / ((windowRange.to - windowRange.from) / 3_600_000)
     : 0
+  const hourlyRateAtomic = BigInt(Math.max(0, Math.round(hourlyRate * Number(atomicScale))))
 
   const activeWorkers = useMemo(() => data?.workers || [], [data?.workers])
   const onlineWorkersCount = useMemo(() => {
@@ -399,6 +447,19 @@ function App() {
       <header className="topbar">
         <Brand />
         <div className="pool-label"><span className="pool-pip" /> SUPPORTXMR <span className="topbar-divider">/</span> MONERO</div>
+        
+        {data?.fiat?.usd ? (
+          <button
+            type="button"
+            className="fiat-ticker-pill"
+            onClick={cycleFiatPref}
+            title={`Click to switch currency format (USD / INR / Both)`}
+          >
+            <span className="fiat-ticker-dot" />
+            <span>1 XMR ≈ {fiatPref === 'inr' ? `₹${data.fiat.inr.toLocaleString('en-IN')}` : fiatPref === 'usd' ? `$${data.fiat.usd.toFixed(2)}` : `$${data.fiat.usd.toFixed(2)} · ₹${data.fiat.inr.toLocaleString('en-IN')}`}</span>
+          </button>
+        ) : null}
+
         <div className="topbar-actions">
           <div className={`connection-state ${data?.collector.lastError ? 'connection-error' : ''}`}>
             <span className="live-pip" />
@@ -430,9 +491,26 @@ function App() {
               <span><Activity size={15} /> CREDITS IN INTERVAL</span>
               <span className="asof">AS OF {formattedLatest}</span>
             </div>
-            <div className="focus-value"><span>{formatXmr(intervalEarned)}</span><em>XMR</em></div>
+            <div className="focus-value">
+              <span>{formatXmr(intervalEarned)}</span>
+              <em>XMR</em>
+            </div>
+            {data?.fiat && (
+              <div className="focus-fiat">
+                ≈ {formatFiat(intervalEarned, data.fiat, fiatPref) || '—'}
+              </div>
+            )}
             <div className="focus-bottomline">
-              <div className="rate-readout"><ArrowUpRight size={16} /><strong>{formatXmr(BigInt(Math.max(0, Math.round(hourlyRate * Number(atomicScale)))))}</strong><span>XMR / HR</span></div>
+              <div className="rate-readout">
+                <ArrowUpRight size={16} />
+                <strong>{formatXmr(hourlyRateAtomic)}</strong>
+                <span>XMR / HR</span>
+                {data?.fiat && hourlyRate > 0 && (
+                  <span className="rate-fiat">
+                    (≈ {formatFiat(hourlyRateAtomic, data.fiat, fiatPref, true)})
+                  </span>
+                )}
+              </div>
               <div className="window-controls" role="group" aria-label="Earnings interval">
                 <button className={choice === 'hour' ? 'selected' : ''} onClick={() => chooseWindow('hour')}>1H</button>
                 <button className={choice === 'day' ? 'selected' : ''} onClick={() => chooseWindow('day')}>24H</button>
@@ -449,9 +527,30 @@ function App() {
           </div>
 
           <div className="metric-stack">
-            <Metric label="TODAY · MIDNIGHT RESET" value={formatXmr(todayEarned)} unit="XMR" icon={<CalendarDays size={16} />} accent="orange" />
-            <Metric label="PENDING BALANCE" value={formatXmr(data?.latest?.pendingAtomic || '0')} unit="XMR" icon={<Wallet size={16} />} accent="mint" />
-            <Metric label="LAST HOUR" value={formatXmr(oneHourEarned)} unit="XMR" icon={<Zap size={16} />} accent="blue" />
+            <Metric
+              label="TODAY · MIDNIGHT RESET"
+              value={formatXmr(todayEarned)}
+              fiatValue={formatFiat(todayEarned, data?.fiat, fiatPref)}
+              unit="XMR"
+              icon={<CalendarDays size={16} />}
+              accent="orange"
+            />
+            <Metric
+              label="PENDING BALANCE"
+              value={formatXmr(data?.latest?.pendingAtomic || '0')}
+              fiatValue={formatFiat(data?.latest?.pendingAtomic || '0', data?.fiat, fiatPref)}
+              unit="XMR"
+              icon={<Wallet size={16} />}
+              accent="mint"
+            />
+            <Metric
+              label="LAST HOUR"
+              value={formatXmr(oneHourEarned)}
+              fiatValue={formatFiat(oneHourEarned, data?.fiat, fiatPref)}
+              unit="XMR"
+              icon={<Zap size={16} />}
+              accent="blue"
+            />
           </div>
         </section>
 
@@ -512,7 +611,7 @@ function App() {
               <EarningsChart data={chartData} from={windowRange.from} to={windowRange.to} />
             </Suspense> : <div className="chart-empty"><Activity size={19} /><span>{data?.latest ? 'More snapshots will shape this chart.' : 'Waiting for the first pool snapshot.'}</span></div>}
           </div>
-          <div className="chart-foot"><span>INTERVAL START <strong>{new Date(windowRange.from).toLocaleString()}</strong></span><span>ESTIMATED RATE <strong>{formatXmr(BigInt(Math.max(0, Math.round(hourlyRate * Number(atomicScale)))))} XMR / HR</strong></span><span>COLLECTION EVERY 60 SEC</span></div>
+          <div className="chart-foot"><span>INTERVAL START <strong>{new Date(windowRange.from).toLocaleString()}</strong></span><span>ESTIMATED RATE <strong>{formatXmr(hourlyRateAtomic)} XMR / HR</strong></span><span>COLLECTION EVERY 60 SEC</span></div>
         </section>
 
         <section className="lower-grid">
@@ -528,7 +627,14 @@ function App() {
                 <thead><tr><th>DAY</th><th>EARNED</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
                 <tbody>{(data?.days || []).slice(0, 8).map((day) => <tr key={day.dayKey}>
                   <td><span className="day-date">{day.dayKey}</span><small>{day.sampleCount.toLocaleString()} samples{day.gapCount > 0 ? ` · ${day.gapCount} gaps` : ''}</small></td>
-                  <td className="daily-amount">{formatXmr(day.earnedAtomic)} <small>XMR</small></td>
+                  <td className="daily-amount">
+                    <div>{formatXmr(day.earnedAtomic)} <small>XMR</small></div>
+                    {data?.fiat && (
+                      <small className="daily-fiat-sub">
+                        ≈ {formatFiat(day.earnedAtomic, data.fiat, fiatPref)}
+                      </small>
+                    )}
+                  </td>
                   <td><span className={`record-status ${day.finalized ? 'finalized' : 'recording'}`}><span />{day.finalized ? 'FINAL' : 'RECORDING'}</span></td>
                   <td>
                     <div className="table-actions">
@@ -549,6 +655,9 @@ function App() {
             <div className="pulse-row"><span><Database size={14} />STORAGE</span><strong>{data?.latest ? 'RECORDING' : 'READY'}</strong></div>
             <div className="pulse-row"><span><Clock3 size={14} />LAST CHECK</span><strong>{latestAge === null ? '—' : `${formatAge(latestAge)} AGO`}</strong></div>
             <div className="pulse-row"><span><Cpu size={14} />TOTAL HASHES</span><strong>{formatNumber(Number(data?.latest?.totalHashes || 0))}</strong></div>
+            {data?.fiat?.usd ? (
+              <div className="pulse-row"><span><Zap size={14} />XMR PRICE</span><strong>${data.fiat.usd.toFixed(2)} · ₹{data.fiat.inr.toLocaleString('en-IN')}</strong></div>
+            ) : null}
             <div className="pulse-foot"><span className="pool-pip" /> READ-ONLY · SUPPORTXMR</div>
           </aside>
         </section>
@@ -577,6 +686,23 @@ function App() {
               <input id="settings-address" autoComplete="off" spellCheck={false} value={addressInput} onChange={(event) => setAddressInput(event.target.value)} required />
               <label className="field-label" htmlFor="settings-timezone">Daily log timezone</label>
               <input id="settings-timezone" value={timeZoneInput} onChange={(event) => setTimeZoneInput(event.target.value)} required />
+              
+              <label className="field-label" htmlFor="settings-fiat">Preferred fiat display currency</label>
+              <select
+                id="settings-fiat"
+                value={fiatPref}
+                onChange={(e) => {
+                  const val = e.target.value as FiatPref
+                  setFiatPref(val)
+                  localStorage.setItem('orelog_fiat_pref', val)
+                }}
+                className="fiat-select"
+              >
+                <option value="both">Both (USD $ + INR ₹)</option>
+                <option value="usd">USD ($) only</option>
+                <option value="inr">INR (₹) only</option>
+              </select>
+
               <p className="settings-warning"><AlertTriangle size={15} /> Changing the wallet or timezone clears this local earnings history and starts a new log.</p>
               {error && <p className="form-error">{error}</p>}
               <div className="dialog-actions">
@@ -638,8 +764,34 @@ function Brand() {
   return <div className="brand"><span className="brand-mark"><Zap size={16} fill="currentColor" /></span><span>ORE<span className="brand-light">LOG</span></span></div>
 }
 
-function Metric({ label, value, unit, icon, accent }: { label: string; value: string; unit: string; icon: React.ReactNode; accent: string }) {
-  return <article className={`metric-card metric-${accent}`}><div className="metric-label"><span>{label}</span><span className="metric-icon">{icon}</span></div><div className="metric-value"><span>{value}</span><small>{unit}</small></div></article>
+function Metric({
+  label,
+  value,
+  fiatValue,
+  unit,
+  icon,
+  accent,
+}: {
+  label: string
+  value: string
+  fiatValue?: string | null
+  unit: string
+  icon: React.ReactNode
+  accent: string
+}) {
+  return (
+    <article className={`metric-card metric-${accent}`}>
+      <div className="metric-label">
+        <span>{label}</span>
+        <span className="metric-icon">{icon}</span>
+      </div>
+      <div className="metric-value">
+        <span>{value}</span>
+        <small>{unit}</small>
+      </div>
+      {fiatValue && <div className="metric-fiat-sub">≈ {fiatValue}</div>}
+    </article>
+  )
 }
 
 function formatAge(seconds: number) {

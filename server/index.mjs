@@ -577,6 +577,52 @@ async function pollPool() {
   }
 }
 
+let cachedFiat = { usd: 0, inr: 0, lastFetched: 0 }
+
+async function getFiatRates() {
+  const now = Date.now()
+  if (cachedFiat.usd > 0 && now - cachedFiat.lastFetched < 5 * 60 * 1000) {
+    return cachedFiat
+  }
+  try {
+    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=monero&vs_currencies=usd,inr', {
+      headers: { 'User-Agent': 'OreLog/1.0' },
+      signal: AbortSignal.timeout(6000),
+    })
+    if (res.ok) {
+      const data = await res.json()
+      if (data?.monero?.usd && data?.monero?.inr) {
+        cachedFiat = {
+          usd: Number(data.monero.usd),
+          inr: Number(data.monero.inr),
+          lastFetched: now,
+        }
+        return cachedFiat
+      }
+    }
+  } catch {}
+
+  try {
+    const res = await fetch('https://api.coinpaprika.com/v1/tickers/xmr-monero?quotes=USD,INR', {
+      headers: { 'User-Agent': 'OreLog/1.0' },
+      signal: AbortSignal.timeout(6000),
+    })
+    if (res.ok) {
+      const data = await res.json()
+      if (data?.quotes?.USD?.price && data?.quotes?.INR?.price) {
+        cachedFiat = {
+          usd: Number(data.quotes.USD.price),
+          inr: Number(data.quotes.INR.price),
+          lastFetched: now,
+        }
+        return cachedFiat
+      }
+    }
+  } catch {}
+
+  return cachedFiat
+}
+
 app.get('/healthz', (_request, response) => response.json({ ok: true }))
 
 app.get('/api/data', async (request, response) => {
@@ -585,12 +631,13 @@ app.get('/api/data', async (request, response) => {
     const from = Number(request.query.from) || now - 24 * 60 * 60 * 1000
     const to = Math.min(now, Number(request.query.to) || now)
     if (to < from) return response.status(400).json({ error: 'End time must be after start time' })
-    let [settings, latest, snapshots, workerSnapshots, days] = await Promise.all([
+    let [settings, latest, snapshots, workerSnapshots, days, fiat] = await Promise.all([
       store.getSettings(),
       store.latestSnapshot(),
       store.snapshotsBetween(from, to),
       store.workerSnapshotsBetween(from, to),
       store.recentDays(),
+      getFiatRates(),
     ])
     
     const duration = to - from
@@ -616,7 +663,7 @@ app.get('/api/data', async (request, response) => {
       workerSnapshots = downsample(workerSnapshots)
     }
 
-    response.json({ settings, latest, snapshots, workers: state.workers || [], workerSnapshots, days, collector: state, serverTime: new Date(now).toISOString() })
+    response.json({ settings, latest, snapshots, workers: state.workers || [], workerSnapshots, days, fiat, collector: state, serverTime: new Date(now).toISOString() })
   } catch (error) {
     response.status(500).json({ error: error.message || 'Unable to load dashboard data' })
   }
