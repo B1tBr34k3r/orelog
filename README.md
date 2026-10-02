@@ -24,8 +24,9 @@
 - 🪙 **True Balance Tracking:** Tracks cumulative pool rewards (`amtPaid` + `amtDue`) so payout events never appear as earning drops.
 - 💵 **Real-Time Dual Fiat Conversion:** Instant live pricing in **USD ($)** and **INR (₹)** with dual API redundancy (CoinGecko & CoinPaprika) and smart caching (zero API keys needed).
 - ⛏️ **Active Miner Telemetry:** Real-time worker cards showing live status badges (`MINING` vs `IDLE`), current hashrates ($H/s$, $KH/s$, $MH/s$), and last share latency.
-- 📈 **Interactive Interval Analysis:** View earnings over **1 Hour**, **24 Hours**, **Today** (since local midnight), or custom intervals with instant hourly rate projections.
-- 🕒 **Timezone-Aware Daily Accounting:** Automatically finalizes daily earnings at local midnight based on verified active uptime.
+- 📈 **Interactive Interval Analysis:** View earnings over **1 Hour**, **24 Hours**, **Today**, or **This Month** with instant hourly rate projections.
+- 📊 **Monthly & Daily Ledgers:** Visual bar graphs for both **Daily (Last 14 Days)** and **Monthly (Last 12 Months)** performance with daily averages and fiat totals.
+- 🕒 **Timezone-Aware Accounting:** Automatically closes daily records at local midnight based on verified active uptime.
 - 🔒 **100% Read-Only & Private:** Only calls public pool stats endpoints. No private keys, no seed phrases, no transaction capabilities.
 - 💾 **Data Ownership & Backup:** Single-click JSON exports by day or full history, with selective database pruning tools.
 - 🚀 **Universal Deployment:** Runs effortlessly on **Cloud VPS** (Oracle Cloud, DigitalOcean, AWS), **Shared Hosting / PHP** (InfinityFree, cPanel), **Docker**, or **Android / Termux**.

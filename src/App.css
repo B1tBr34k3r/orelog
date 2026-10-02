@@ -79,6 +79,11 @@
 .metric-orange .metric-icon { color: var(--orange); }
 .metric-mint .metric-icon { color: var(--acid); }
 .metric-blue .metric-icon { color: var(--blue); }
+.metric-purple .metric-icon { color: #b580ff; }
+.view-toggle-group { display: inline-flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid var(--line); background: #101410; border-radius: 2px; }
+.view-toggle-btn { padding: 4px 10px; background: transparent; border: 1px solid transparent; color: var(--dim); font: 500 10px/1 var(--mono); cursor: pointer; border-radius: 2px; transition: all 130ms ease; }
+.view-toggle-btn:hover { color: var(--bright); }
+.view-toggle-btn.active { background: #1c241c; border-color: #3b4935; color: var(--acid); }
 .worker-panel { margin-top: 12px; padding: 17px 20px 16px; border: 1px solid var(--line); background: rgba(20, 24, 20, .87); }
 .worker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
 .worker-card { display: flex; flex-direction: column; justify-content: space-between; gap: 10px; min-width: 0; padding: 13px 15px; border: 1px solid var(--line); background: #141814; }
@@ -208,7 +213,7 @@ input[type="datetime-local"] { color-scheme: dark; }
   .custom-range label { flex: 1 1 42%; }
   .custom-range input { width: 100%; box-sizing: border-box; font-size: 10px; }
   .custom-range > span { width: 100%; margin: 0; }
-  .metric-stack { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .metric-stack { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
   .metric-card { padding: 11px 9px; }
   .metric-label { align-items: flex-start; font-size: 8px; }
   .metric-label > span:first-child { max-width: 90px; }

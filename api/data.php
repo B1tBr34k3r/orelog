@@ -117,8 +117,8 @@ $wAfter = $db->prepare(
 $wAfter->execute([$toDt]);
 $wRows = array_merge($wBefore->fetchAll(), $wWithin->fetchAll(), $wAfter->fetchAll());
 
-// Daily records (last 31 days)
-$days = $db->query("SELECT * FROM daily_records ORDER BY day_key DESC LIMIT 31")->fetchAll();
+// Daily records (last 365 days / 12 months)
+$days = $db->query("SELECT * FROM daily_records ORDER BY day_key DESC LIMIT 365")->fetchAll();
 
 // Poll state
 $pollState = $db->query("SELECT * FROM poll_state WHERE id = 1")->fetch();

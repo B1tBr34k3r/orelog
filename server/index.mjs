@@ -144,7 +144,7 @@ class JsonlStore {
     if (changed) await this.saveDays()
   }
 
-  async recentDays(limit = 31) {
+  async recentDays(limit = 365) {
     return [...this.memory.days].sort((a, b) => b.dayKey.localeCompare(a.dayKey)).slice(0, limit)
   }
 
@@ -362,7 +362,7 @@ class PostgresStore {
     await this.pool.query('UPDATE daily_records SET finalized = TRUE WHERE day_key < $1', [dayKey])
   }
 
-  async recentDays(limit = 31) {
+  async recentDays(limit = 365) {
     const { rows } = await this.pool.query(
       'SELECT day_key, earned_atomic, sample_count, gap_count, first_at, last_at, finalized FROM daily_records ORDER BY day_key DESC LIMIT $1',
       [limit],

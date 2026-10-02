@@ -1,30 +1,30 @@
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
-type DayItem = {
-  dayKey: string
-  fullDay: string
+export type MonthItem = {
+  monthKey: string
+  label: string
+  fullMonth: string
   earned: number
-  finalized: boolean
+  earnedAtomic: string
+  daysCount: number
+  sampleCount: number
+  isCurrent: boolean
 }
 
 type Props = {
-  days: Array<{
-    dayKey: string
-    earnedAtomic: string
-    finalized: boolean
-  }>
+  months: MonthItem[]
   fiat?: { usd: number; inr: number } | null
   fiatPref?: 'both' | 'usd' | 'inr'
 }
 
-function DailyTooltip({
+function MonthlyTooltip({
   active,
   payload,
   fiat,
   fiatPref,
 }: {
   active?: boolean
-  payload?: Array<{ value: number; payload: DayItem }>
+  payload?: Array<{ value: number; payload: MonthItem }>
   fiat?: { usd: number; inr: number } | null
   fiatPref?: 'both' | 'usd' | 'inr'
 }) {
@@ -43,32 +43,25 @@ function DailyTooltip({
 
   return (
     <div className="chart-tooltip">
-      <span>{item.fullDay} {item.finalized ? '(Final)' : '(In progress)'}</span>
-      <strong>{Number(item.earned).toFixed(8)} XMR{fiatStr}</strong>
+      <span>{item.fullMonth} {item.isCurrent ? '(Month to date)' : `(${item.daysCount} days recorded)`}</span>
+      <strong>{item.earned.toFixed(6)} XMR{fiatStr}</strong>
     </div>
   )
 }
 
-export default function DailyBarChart({ days, fiat, fiatPref }: Props) {
-  const data: DayItem[] = days
-    .slice(0, 14)
-    .reverse()
-    .map((d) => ({
-      dayKey: d.dayKey.slice(5),
-      fullDay: d.dayKey,
-      earned: Number(d.earnedAtomic) / 1e12,
-      finalized: d.finalized,
-    }))
+export default function MonthlyBarChart({ months, fiat, fiatPref }: Props) {
+  // Show last 12 months chronologically
+  const data = [...months].slice(0, 12).reverse()
 
   if (!data.length) return null
 
   return (
-    <div style={{ width: '100%', height: 160, marginBottom: '1.25rem' }}>
+    <div style={{ width: '100%', height: 165, marginBottom: '1.25rem' }}>
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
           <CartesianGrid vertical={false} stroke="#29302c" strokeDasharray="2 5" />
           <XAxis
-            dataKey="dayKey"
+            dataKey="label"
             stroke="#747b73"
             tickLine={false}
             axisLine={false}
@@ -83,8 +76,8 @@ export default function DailyBarChart({ days, fiat, fiatPref }: Props) {
             tickFormatter={(val) => Number(val).toFixed(4)}
             tick={{ fontSize: 11, fontFamily: 'DM Mono' }}
           />
-          <Tooltip content={<DailyTooltip fiat={fiat} fiatPref={fiatPref} />} />
-          <Bar dataKey="earned" fill="#b7ff5b" radius={[3, 3, 0, 0]} maxBarSize={32} />
+          <Tooltip content={<MonthlyTooltip fiat={fiat} fiatPref={fiatPref} />} />
+          <Bar dataKey="earned" fill="#80a8ff" radius={[3, 3, 0, 0]} maxBarSize={36} />
         </BarChart>
       </ResponsiveContainer>
     </div>

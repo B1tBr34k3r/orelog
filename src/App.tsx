@@ -5,6 +5,7 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   CalendarDays,
+  CalendarRange,
   Check,
   Clock3,
   Cpu,
@@ -22,6 +23,7 @@ import './App.css'
 
 const EarningsChart = lazy(() => import('./EarningsChart'))
 const DailyBarChart = lazy(() => import('./DailyBarChart'))
+const MonthlyBarChart = lazy(() => import('./MonthlyBarChart'))
 
 type Snapshot = {
   recordedAt: string
@@ -47,6 +49,17 @@ type DailyRecord = {
   finalized: boolean
 }
 
+type MonthRecord = {
+  monthKey: string
+  label: string
+  fullMonth: string
+  earned: number
+  earnedAtomic: string
+  daysCount: number
+  sampleCount: number
+  isCurrent: boolean
+}
+
 type FiatRates = {
   usd: number
   inr: number
@@ -63,7 +76,7 @@ type DashboardData = {
   serverTime: string
 }
 
-type WindowChoice = 'hour' | 'day' | 'today' | 'custom'
+type WindowChoice = 'hour' | 'day' | 'today' | 'month' | 'custom'
 type FiatPref = 'both' | 'usd' | 'inr'
 
 const atomicScale = 1_000_000_000_000n
@@ -149,6 +162,12 @@ function zonedMidnight(dayKey: string, timeZone: string) {
   return guess
 }
 
+function zonedMonthStart(dayKey: string, timeZone: string) {
+  const [year, month] = dayKey.split('-').map(Number)
+  const monthDayKey = `${year}-${String(month).padStart(2, '0')}-01`
+  return zonedMidnight(monthDayKey, timeZone)
+}
+
 function localInput(timestamp: number) {
   const date = new Date(timestamp - new Date(timestamp).getTimezoneOffset() * 60_000)
   return date.toISOString().slice(0, 16)
@@ -203,6 +222,7 @@ function App() {
   const [customFrom, setCustomFrom] = useState(() => localInput(appStartedAt - 60 * 60 * 1000))
   const [customTo, setCustomTo] = useState(() => localInput(appStartedAt))
   const [fiatPref, setFiatPref] = useState<FiatPref>(() => (localStorage.getItem('orelog_fiat_pref') as FiatPref) || 'both')
+  const [historyView, setHistoryView] = useState<'daily' | 'monthly'>('daily')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [addressInput, setAddressInput] = useState('')
   const [timeZoneInput, setTimeZoneInput] = useState(defaultTimeZone)
@@ -288,8 +308,7 @@ function App() {
     }
   }, [])
 
-  // Trigger server-side poll (used by PHP backend on InfinityFree;
-  // silently ignored when running against the Express server locally)
+  // Trigger server-side poll
   useEffect(() => {
     const poll = () => fetch('/api/poll').catch(() => {})
     poll()
@@ -309,6 +328,7 @@ function App() {
     const end = latestAt || clock
     if (choice === 'hour') return { from: end - 60 * 60 * 1000, to: end }
     if (choice === 'today') return { from: zonedMidnight(localDayKey(end, timeZone), timeZone), to: end }
+    if (choice === 'month') return { from: zonedMonthStart(localDayKey(end, timeZone), timeZone), to: end }
     if (choice === 'custom') {
       const from = Date.parse(customFrom) || end - 60 * 60 * 1000
       const to = Math.min(Date.parse(customTo) || end, end)
@@ -336,6 +356,54 @@ function App() {
   const dayKey = localDayKey(latestAt || clock, timeZone)
   const todayRecord = data?.days.find((day) => day.dayKey === dayKey)
   const todayEarned = BigInt(todayRecord?.earnedAtomic || '0')
+  
+  const currentMonthKey = dayKey.slice(0, 7) // "YYYY-MM"
+  const currentMonthName = useMemo(() => {
+    const [year, month] = currentMonthKey.split('-').map(Number)
+    return new Date(Date.UTC(year, month - 1, 1)).toLocaleString('en-US', { month: 'short', timeZone: 'UTC' }).toUpperCase()
+  }, [currentMonthKey])
+
+  const thisMonthEarned = useMemo(() => {
+    if (!data?.days?.length) return 0n
+    return data.days
+      .filter((day) => day.dayKey.startsWith(currentMonthKey))
+      .reduce((acc, day) => acc + BigInt(day.earnedAtomic || '0'), 0n)
+  }, [data?.days, currentMonthKey])
+
+  const monthlyRecords = useMemo<MonthRecord[]>(() => {
+    if (!data?.days?.length) return []
+    const map = new Map<string, { earnedAtomic: bigint; sampleCount: number; daysCount: number }>()
+
+    for (const day of data.days) {
+      const mKey = day.dayKey.slice(0, 7)
+      const existing = map.get(mKey) || { earnedAtomic: 0n, sampleCount: 0, daysCount: 0 }
+      existing.earnedAtomic += BigInt(day.earnedAtomic || '0')
+      existing.sampleCount += day.sampleCount || 0
+      existing.daysCount += 1
+      map.set(mKey, existing)
+    }
+
+    const result: MonthRecord[] = []
+    for (const [mKey, val] of map.entries()) {
+      const [year, month] = mKey.split('-').map(Number)
+      const date = new Date(Date.UTC(year, month - 1, 1))
+      const label = date.toLocaleString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' })
+      const fullMonth = date.toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+      result.push({
+        monthKey: mKey,
+        label,
+        fullMonth,
+        earnedAtomic: val.earnedAtomic.toString(),
+        earned: Number(val.earnedAtomic) / Number(atomicScale),
+        daysCount: val.daysCount,
+        sampleCount: val.sampleCount,
+        isCurrent: mKey === currentMonthKey,
+      })
+    }
+
+    return result.sort((a, b) => b.monthKey.localeCompare(a.monthKey))
+  }, [data?.days, currentMonthKey])
+
   const hourlyRate = windowRange.to > windowRange.from
     ? Number(intervalEarned) / Number(atomicScale) / ((windowRange.to - windowRange.from) / 3_600_000)
     : 0
@@ -407,7 +475,17 @@ function App() {
     }
   }
 
-  const activePeriodName = choice === 'hour' ? 'Last hour' : choice === 'today' ? 'Today' : choice === 'custom' ? 'Selected interval' : 'Last 24 hours'
+  const activePeriodName =
+    choice === 'hour'
+      ? 'Last hour'
+      : choice === 'day'
+      ? 'Last 24 hours'
+      : choice === 'today'
+      ? 'Today'
+      : choice === 'month'
+      ? `This month (${currentMonthName})`
+      : 'Selected interval'
+
   const formattedLatest = data?.latest
     ? new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(new Date(data.latest.recordedAt))
     : 'Waiting for first snapshot'
@@ -515,6 +593,7 @@ function App() {
                 <button className={choice === 'hour' ? 'selected' : ''} onClick={() => chooseWindow('hour')}>1H</button>
                 <button className={choice === 'day' ? 'selected' : ''} onClick={() => chooseWindow('day')}>24H</button>
                 <button className={choice === 'today' ? 'selected' : ''} onClick={() => chooseWindow('today')}>TODAY</button>
+                <button className={choice === 'month' ? 'selected' : ''} onClick={() => chooseWindow('month')}>MONTH</button>
                 <button className={choice === 'custom' ? 'selected' : ''} onClick={() => chooseWindow('custom')}><CalendarDays size={14} /><span>CUSTOM</span></button>
               </div>
             </div>
@@ -534,6 +613,14 @@ function App() {
               unit="XMR"
               icon={<CalendarDays size={16} />}
               accent="orange"
+            />
+            <Metric
+              label={`THIS MONTH · ${currentMonthName}`}
+              value={formatXmr(thisMonthEarned)}
+              fiatValue={formatFiat(thisMonthEarned, data?.fiat, fiatPref)}
+              unit="XMR"
+              icon={<CalendarRange size={16} />}
+              accent="purple"
             />
             <Metric
               label="PENDING BALANCE"
@@ -616,37 +703,115 @@ function App() {
 
         <section className="lower-grid">
           <div className="daily-panel">
-            <div className="section-heading lower-heading"><div><p className="eyebrow">LOCAL MIDNIGHT CLOSE</p><h2>Daily earnings</h2></div><span className="timezone-tag">{timeZone}</span></div>
-            {data?.days && data.days.length > 0 && (
-              <Suspense fallback={null}>
-                <DailyBarChart days={data.days} />
-              </Suspense>
-            )}
-            <div className="daily-table-wrap">
-              <table className="daily-table">
-                <thead><tr><th>DAY</th><th>EARNED</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
-                <tbody>{(data?.days || []).slice(0, 8).map((day) => <tr key={day.dayKey}>
-                  <td><span className="day-date">{day.dayKey}</span><small>{day.sampleCount.toLocaleString()} samples</small></td>
-                  <td className="daily-amount">
-                    <div>{formatXmr(day.earnedAtomic)} <small>XMR</small></div>
-                    {data?.fiat && (
-                      <small className="daily-fiat-sub">
-                        ≈ {formatFiat(day.earnedAtomic, data.fiat, fiatPref)}
-                      </small>
-                    )}
-                  </td>
-                  <td><span className={`record-status ${day.finalized ? 'finalized' : 'recording'}`}><span />{day.finalized ? 'FINAL' : 'RECORDING'}</span></td>
-                  <td>
-                    <div className="table-actions">
-                      <button className="icon-action-button" title={`Export JSON for ${day.dayKey}`} onClick={() => handleExport('date', day.dayKey)}><Download size={13} /></button>
-                      <button className="icon-action-button action-danger" title={`Delete data for ${day.dayKey}`} onClick={() => handleDelete('date', day.dayKey)}><Trash2 size={13} /></button>
-                    </div>
-                  </td>
-                </tr>)}</tbody>
-              </table>
-              {!data?.days.length && <div className="table-empty">The daily log begins with your first pool snapshot.</div>}
+            <div className="section-heading lower-heading">
+              <div>
+                <p className="eyebrow">HISTORICAL LEDGER <span>·</span> {timeZone}</p>
+                <h2>{historyView === 'daily' ? 'Daily earnings' : 'Monthly earnings'}</h2>
+              </div>
+              <div className="view-toggle-group" role="tablist" aria-label="Ledger view">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={historyView === 'daily'}
+                  className={`view-toggle-btn ${historyView === 'daily' ? 'active' : ''}`}
+                  onClick={() => setHistoryView('daily')}
+                >
+                  Daily
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={historyView === 'monthly'}
+                  className={`view-toggle-btn ${historyView === 'monthly' ? 'active' : ''}`}
+                  onClick={() => setHistoryView('monthly')}
+                >
+                  Monthly
+                </button>
+              </div>
             </div>
-            <p className="table-note"><ShieldCheck size={14} /> Daily totals are based on pool balance changes recorded during active monitoring.</p>
+
+            {historyView === 'daily' ? (
+              <>
+                {data?.days && data.days.length > 0 && (
+                  <Suspense fallback={null}>
+                    <DailyBarChart days={data.days} fiat={data?.fiat} fiatPref={fiatPref} />
+                  </Suspense>
+                )}
+                <div className="daily-table-wrap">
+                  <table className="daily-table">
+                    <thead><tr><th>DAY</th><th>EARNED</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
+                    <tbody>{(data?.days || []).slice(0, 14).map((day) => <tr key={day.dayKey}>
+                      <td><span className="day-date">{day.dayKey}</span><small>{day.sampleCount.toLocaleString()} samples</small></td>
+                      <td className="daily-amount">
+                        <div>{formatXmr(day.earnedAtomic)} <small>XMR</small></div>
+                        {data?.fiat && (
+                          <small className="daily-fiat-sub">
+                            ≈ {formatFiat(day.earnedAtomic, data.fiat, fiatPref)}
+                          </small>
+                        )}
+                      </td>
+                      <td><span className={`record-status ${day.finalized ? 'finalized' : 'recording'}`}><span />{day.finalized ? 'FINAL' : 'RECORDING'}</span></td>
+                      <td>
+                        <div className="table-actions">
+                          <button className="icon-action-button" title={`Export JSON for ${day.dayKey}`} onClick={() => handleExport('date', day.dayKey)}><Download size={13} /></button>
+                          <button className="icon-action-button action-danger" title={`Delete data for ${day.dayKey}`} onClick={() => handleDelete('date', day.dayKey)}><Trash2 size={13} /></button>
+                        </div>
+                      </td>
+                    </tr>)}</tbody>
+                  </table>
+                  {!data?.days.length && <div className="table-empty">The daily log begins with your first pool snapshot.</div>}
+                </div>
+                <p className="table-note"><ShieldCheck size={14} /> Daily totals are based on pool balance changes recorded during active monitoring.</p>
+              </>
+            ) : (
+              <>
+                {monthlyRecords.length > 0 && (
+                  <Suspense fallback={null}>
+                    <MonthlyBarChart months={monthlyRecords} fiat={data?.fiat} fiatPref={fiatPref} />
+                  </Suspense>
+                )}
+                <div className="daily-table-wrap">
+                  <table className="daily-table">
+                    <thead><tr><th>MONTH</th><th>TOTAL EARNED</th><th>DAILY AVG</th><th>DAYS MONITORED</th></tr></thead>
+                    <tbody>{monthlyRecords.map((m) => {
+                      const avgDailyAtomic = m.daysCount > 0 ? (BigInt(m.earnedAtomic) / BigInt(m.daysCount)).toString() : '0'
+                      return (
+                        <tr key={m.monthKey}>
+                          <td>
+                            <span className="day-date">{m.fullMonth}</span>
+                            <small>{m.sampleCount.toLocaleString()} samples</small>
+                          </td>
+                          <td className="daily-amount">
+                            <div>{formatXmr(m.earnedAtomic)} <small>XMR</small></div>
+                            {data?.fiat && (
+                              <small className="daily-fiat-sub">
+                                ≈ {formatFiat(m.earnedAtomic, data.fiat, fiatPref)}
+                              </small>
+                            )}
+                          </td>
+                          <td className="daily-amount">
+                            <div>{formatXmr(avgDailyAtomic, 6)} <small>XMR/day</small></div>
+                            {data?.fiat && (
+                              <small className="daily-fiat-sub">
+                                ≈ {formatFiat(avgDailyAtomic, data.fiat, fiatPref)}/day
+                              </small>
+                            )}
+                          </td>
+                          <td>
+                            <span className={`record-status ${m.isCurrent ? 'recording' : 'finalized'}`}>
+                              <span />
+                              {m.isCurrent ? `${m.daysCount}d (In progress)` : `${m.daysCount} days recorded`}
+                            </span>
+                          </td>
+                        </tr>
+                      )
+                    })}</tbody>
+                  </table>
+                  {!monthlyRecords.length && <div className="table-empty">Monthly records will appear as daily logs are recorded.</div>}
+                </div>
+                <p className="table-note"><ShieldCheck size={14} /> Monthly metrics aggregate all verified daily snapshots for each calendar month.</p>
+              </>
+            )}
           </div>
 
           <aside className="status-panel">
