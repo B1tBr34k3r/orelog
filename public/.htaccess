@@ -1,0 +1,13 @@
+RewriteEngine On
+
+# --- API routing: clean URLs → PHP scripts ---
+RewriteRule ^api/data$      api/data.php     [L,QSA]
+RewriteRule ^api/settings$  api/settings.php [L,QSA]
+RewriteRule ^api/poll$      api/poll.php     [L,QSA]
+RewriteRule ^api/export$    api/export.php   [L,QSA]
+RewriteRule ^healthz$       api/poll.php?healthz=1 [L,QSA]
+
+# --- SPA fallback: serve index.html for all non-file routes ---
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.html [L]

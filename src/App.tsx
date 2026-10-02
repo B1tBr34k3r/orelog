@@ -32,7 +32,12 @@ type Snapshot = {
   lastHashSeconds: number
 }
 
-type WorkerSnapshot = { recordedAt: string; workers: { identifier: string; cumulativeAtomic: string }[] }
+type ActiveWorker = {
+  name: string
+  hashrate: number
+  lastShare: number
+  totalHashes?: number
+}
 
 type DailyRecord = {
   dayKey: string
@@ -46,7 +51,7 @@ type DashboardData = {
   settings: { address: string; timeZone: string } | null
   latest: Snapshot | null
   snapshots: Snapshot[]
-  workerSnapshots: WorkerSnapshot[]
+  workers?: ActiveWorker[]
   days: DailyRecord[]
   collector: { lastPollAt: string | null; lastError: string | null; isPolling: boolean }
   serverTime: string
@@ -69,6 +74,13 @@ function formatXmr(value: string | bigint, digits = 8) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value)
+}
+
+function formatHashrate(h: number) {
+  if (!h || h <= 0) return '0 H/s'
+  if (h >= 1_000_000) return `${(h / 1_000_000).toFixed(2)} MH/s`
+  if (h >= 1_000) return `${(h / 1_000).toFixed(1)} KH/s`
+  return `${h.toLocaleString()} H/s`
 }
 
 function localDayKey(timestamp: number, timeZone: string) {
@@ -130,35 +142,6 @@ function intervalAmount(samples: Snapshot[], from: number, to: number) {
   return start === null || end === null || end < start ? 0n : end - start
 }
 
-function workerCumulativeAt(samples: WorkerSnapshot[], identifier: string, timestamp: number) {
-  const ordered = [...samples].sort((a, b) => Date.parse(a.recordedAt) - Date.parse(b.recordedAt))
-  if (!ordered.length) return null
-  const valueAt = (snapshot: WorkerSnapshot) => snapshot.workers.find((worker) => worker.identifier === identifier)?.cumulativeAtomic
-  let value: string = valueAt(ordered[0]) ?? '0'
-  if (value === undefined) value = '0'
-  if (timestamp <= Date.parse(ordered[0].recordedAt)) return BigInt(value)
-  for (let index = 1; index < ordered.length; index += 1) {
-    const current = ordered[index]
-    const previous = ordered[index - 1]
-    const previousValue: string = valueAt(previous) ?? value
-    const currentValue: string = valueAt(current) ?? previousValue
-    if (timestamp <= Date.parse(current.recordedAt)) {
-      const duration = BigInt(Math.max(1, Date.parse(current.recordedAt) - Date.parse(previous.recordedAt)))
-      const elapsed = BigInt(Math.max(0, timestamp - Date.parse(previous.recordedAt)))
-      const difference = BigInt(currentValue) - BigInt(previousValue)
-      return difference <= 0n ? BigInt(previousValue) : BigInt(previousValue) + difference * elapsed / duration
-    }
-    value = currentValue
-  }
-  return BigInt(value)
-}
-
-function workerIntervalAmount(samples: WorkerSnapshot[], identifier: string, from: number, to: number) {
-  const start = workerCumulativeAt(samples, identifier, from)
-  const end = workerCumulativeAt(samples, identifier, to)
-  return start === null || end === null || end < start ? 0n : end - start
-}
-
 async function requestJson<T>(url: string, options: RequestInit = {}, accessKey = ''): Promise<T> {
   const response = await fetch(url, {
     ...options,
@@ -179,7 +162,6 @@ async function requestJson<T>(url: string, options: RequestInit = {}, accessKey 
 function App() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [choice, setChoice] = useState<WindowChoice>('day')
-  const [selectedWorker, setSelectedWorker] = useState('all')
   const [customFrom, setCustomFrom] = useState(() => localInput(appStartedAt - 60 * 60 * 1000))
   const [customTo, setCustomTo] = useState(() => localInput(appStartedAt))
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -259,6 +241,15 @@ function App() {
     }
   }, [])
 
+  // Trigger server-side poll (used by PHP backend on InfinityFree;
+  // silently ignored when running against the Express server locally)
+  useEffect(() => {
+    const poll = () => fetch('/api/poll').catch(() => {})
+    poll()
+    const timer = window.setInterval(poll, 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
   const timeZone = data?.settings?.timeZone || timeZoneInput || defaultTimeZone
   const latestAt = data?.latest ? Date.parse(data.latest.recordedAt) : 0
   const latestAge = latestAt ? Math.max(0, Math.floor((clock - latestAt) / 1000)) : null
@@ -266,6 +257,7 @@ function App() {
     ? Math.max(0, Math.floor(clock / 1000) - data.latest.lastHashSeconds)
     : null
   const minerOnline = minerAge !== null && minerAge < 10 * 60
+
   const windowRange = useMemo(() => {
     const end = latestAt || clock
     if (choice === 'hour') return { from: end - 60 * 60 * 1000, to: end }
@@ -287,11 +279,10 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [choice, customFrom, customTo, data?.latest?.recordedAt])
 
-  const workerIds = useMemo(() => [...new Set((data?.workerSnapshots || []).flatMap((sample) => sample.workers.map((worker) => worker.identifier)))].sort(), [data?.workerSnapshots])
-  const selectedEarned = useMemo(() => selectedWorker === 'all'
-    ? intervalAmount(data?.snapshots || [], windowRange.from, windowRange.to)
-    : workerIntervalAmount(data?.workerSnapshots || [], selectedWorker, windowRange.from, windowRange.to),
-  [selectedWorker, data?.snapshots, data?.workerSnapshots, windowRange.from, windowRange.to])
+  const intervalEarned = useMemo(
+    () => intervalAmount(data?.snapshots || [], windowRange.from, windowRange.to),
+    [data?.snapshots, windowRange.from, windowRange.to]
+  )
   const oneHourEarned = data?.latest && data.snapshots.length
     ? intervalAmount(data.snapshots, latestAt - 60 * 60 * 1000, latestAt)
     : 0n
@@ -299,60 +290,46 @@ function App() {
   const todayRecord = data?.days.find((day) => day.dayKey === dayKey)
   const todayEarned = BigInt(todayRecord?.earnedAtomic || '0')
   const hourlyRate = windowRange.to > windowRange.from
-    ? Number(selectedEarned) / Number(atomicScale) / ((windowRange.to - windowRange.from) / 3_600_000)
+    ? Number(intervalEarned) / Number(atomicScale) / ((windowRange.to - windowRange.from) / 3_600_000)
     : 0
+
+  const activeWorkers = useMemo(() => data?.workers || [], [data?.workers])
+  const onlineWorkersCount = useMemo(() => {
+    return activeWorkers.filter((worker) => {
+      const workerAge = worker.lastShare > 0 ? Math.max(0, Math.floor(clock / 1000) - worker.lastShare) : null
+      return (workerAge !== null && workerAge < 600) || worker.hashrate > 0
+    }).length
+  }, [activeWorkers, clock])
+
   const chartData = useMemo(() => {
     const samples = data?.snapshots || []
-    const workerSamples = data?.workerSnapshots || []
     const baseCombined = cumulativeAt(samples, windowRange.from)
-    
-    const workerBases = new Map<string, bigint>()
-    for (const worker of workerIds) {
-      workerBases.set(worker, workerCumulativeAt(workerSamples, worker, windowRange.from) || 0n)
-    }
-
     if (baseCombined === null) return []
     
-    const initialPoint: any = { at: windowRange.from, earned: 0 }
-    for (const worker of workerIds) {
-      initialPoint[worker] = 0
-    }
-    const points = [initialPoint]
+    const points: Array<{ at: number; earned: number }> = [
+      { at: windowRange.from, earned: 0 }
+    ]
 
     for (const sample of samples) {
       const timestamp = Date.parse(sample.recordedAt)
       if (timestamp < windowRange.from || timestamp > windowRange.to) continue
       
       const valCombined = BigInt(sample.cumulativeAtomic) - baseCombined
-      const point: any = { 
+      points.push({ 
         at: timestamp, 
         earned: Number(valCombined > 0n ? valCombined : 0n) / Number(atomicScale) 
-      }
-
-      for (const worker of workerIds) {
-        const valWorker = (workerCumulativeAt(workerSamples, worker, timestamp) ?? 0n) - (workerBases.get(worker) ?? 0n)
-        point[worker] = Number(valWorker > 0n ? valWorker : 0n) / Number(atomicScale)
-      }
-      
-      points.push(point)
+      })
     }
     
     if (points.length === 1 && data?.latest) {
       const valCombined = intervalAmount(samples, windowRange.from, windowRange.to)
-      const point: any = { 
+      points.push({ 
         at: windowRange.to, 
         earned: Number(valCombined) / Number(atomicScale) 
-      }
-      
-      for (const worker of workerIds) {
-        const valWorker = workerIntervalAmount(workerSamples, worker, windowRange.from, windowRange.to)
-        point[worker] = Number(valWorker) / Number(atomicScale)
-      }
-      
-      points.push(point)
+      })
     }
     return points
-  }, [data?.snapshots, data?.workerSnapshots, data?.latest, workerIds, windowRange.from, windowRange.to])
+  }, [data?.snapshots, data?.latest, windowRange.from, windowRange.to])
 
   const saveSettings = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -374,8 +351,6 @@ function App() {
     }
   }
 
-
-
   const chooseWindow = (next: WindowChoice) => {
     setChoice(next)
     if (next === 'custom') {
@@ -392,8 +367,6 @@ function App() {
     setLoading(true)
     void refresh(windowRange.from, windowRange.to)
   }
-
-
 
   if (!loading && !data?.settings) {
     return (
@@ -444,7 +417,7 @@ function App() {
           </div>
           <div className="activity-badge">
             <span className={`activity-pip ${minerOnline ? '' : 'activity-idle'}`} />
-            <div><strong>{minerOnline ? 'Miner active' : 'No recent shares'}</strong><small>{minerAge === null ? 'Waiting for first share' : minerOnline ? `Last share ${formatAge(minerAge)} ago` : `Last share ${formatAge(minerAge)} ago`}</small></div>
+            <div><strong>{minerOnline ? 'Miner active' : 'No recent shares'}</strong><small>{minerAge === null ? 'Waiting for first share' : `Last share ${formatAge(minerAge)} ago`}</small></div>
           </div>
         </section>
 
@@ -453,8 +426,11 @@ function App() {
 
         <section className="earnings-layout">
           <div className="earnings-focus">
-            <div className="focus-topline"><span><Activity size={15} /> CREDITS IN INTERVAL</span><label className="worker-picker">VIEW <select aria-label="Choose combined or individual worker earnings" value={selectedWorker} onChange={(event) => setSelectedWorker(event.target.value)}><option value="all">Combined</option>{workerIds.map((worker) => <option key={worker} value={worker}>{worker}</option>)}</select></label><span className="asof">AS OF {formattedLatest}</span></div>
-            <div className="focus-value"><span>{formatXmr(selectedEarned)}</span><em>XMR</em></div>
+            <div className="focus-topline">
+              <span><Activity size={15} /> CREDITS IN INTERVAL</span>
+              <span className="asof">AS OF {formattedLatest}</span>
+            </div>
+            <div className="focus-value"><span>{formatXmr(intervalEarned)}</span><em>XMR</em></div>
             <div className="focus-bottomline">
               <div className="rate-readout"><ArrowUpRight size={16} /><strong>{formatXmr(BigInt(Math.max(0, Math.round(hourlyRate * Number(atomicScale)))))}</strong><span>XMR / HR</span></div>
               <div className="window-controls" role="group" aria-label="Earnings interval">
@@ -479,12 +455,50 @@ function App() {
           </div>
         </section>
 
+        {/* Active Workers Section */}
         <section className="worker-panel">
-          <div className="section-heading lower-heading"><div><p className="eyebrow">{activePeriodName.toUpperCase()}</p><h2>Earnings by miner</h2></div><span className="timezone-tag">COMBINED + WORKERS</span></div>
-          <div className="worker-earnings-grid">
-            <article className="worker-earning-card worker-total"><span>Combined</span><strong>{formatXmr(intervalAmount(data?.snapshots || [], windowRange.from, windowRange.to))}<small> XMR</small></strong></article>
-            {workerIds.map((worker) => <article className="worker-earning-card" key={worker}><span>{worker}</span><strong>{formatXmr(workerIntervalAmount(data?.workerSnapshots || [], worker, windowRange.from, windowRange.to))}<small> XMR</small></strong></article>)}
-            {!workerIds.length && <p className="worker-empty">Worker details appear after SupportXMR provides the first worker snapshot.</p>}
+          <div className="section-heading lower-heading">
+            <div>
+              <p className="eyebrow">SUPPORTXMR POOL</p>
+              <h2>Active miners</h2>
+            </div>
+            <span className="timezone-tag">
+              {onlineWorkersCount > 0 ? `${onlineWorkersCount} MINING NOW` : 'NO ACTIVE WORKERS'}
+            </span>
+          </div>
+          <div className="worker-grid">
+            {activeWorkers.map((worker) => {
+              const workerAge = worker.lastShare > 0 ? Math.max(0, Math.floor(clock / 1000) - worker.lastShare) : null
+              const isOnline = (workerAge !== null && workerAge < 600) || worker.hashrate > 0
+              return (
+                <article className="worker-card" key={worker.name}>
+                  <div className="worker-card-header">
+                    <span className="worker-name">
+                      <Cpu size={14} />
+                      {worker.name}
+                    </span>
+                    <span className={`worker-status-badge ${isOnline ? 'worker-status-online' : 'worker-status-idle'}`}>
+                      <span className="worker-status-pip" />
+                      {isOnline ? 'MINING' : 'IDLE'}
+                    </span>
+                  </div>
+                  <div className="worker-stats">
+                    <div className="worker-hashrate">
+                      {formatHashrate(worker.hashrate)}
+                    </div>
+                    <div className="worker-last-share">
+                      {workerAge === null ? 'No shares yet' : `Last share ${formatAge(workerAge)} ago`}
+                    </div>
+                  </div>
+                </article>
+              )
+            })}
+            {!activeWorkers.length && (
+              <p className="worker-empty">
+                <Cpu size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '6px' }} />
+                {data?.latest ? 'No separate worker IDs reported. Mining under default account.' : 'Waiting for worker activity from SupportXMR.'}
+              </p>
+            )}
           </div>
         </section>
 
@@ -495,7 +509,7 @@ function App() {
           </div>
           <div className="chart-wrap">
             {chartData.length > 1 ? <Suspense fallback={<div className="chart-empty">Loading chart…</div>}>
-              <EarningsChart data={chartData} from={windowRange.from} to={windowRange.to} workers={workerIds} />
+              <EarningsChart data={chartData} from={windowRange.from} to={windowRange.to} />
             </Suspense> : <div className="chart-empty"><Activity size={19} /><span>{data?.latest ? 'More snapshots will shape this chart.' : 'Waiting for the first pool snapshot.'}</span></div>}
           </div>
           <div className="chart-foot"><span>INTERVAL START <strong>{new Date(windowRange.from).toLocaleString()}</strong></span><span>ESTIMATED RATE <strong>{formatXmr(BigInt(Math.max(0, Math.round(hourlyRate * Number(atomicScale)))))} XMR / HR</strong></span><span>COLLECTION EVERY 60 SEC</span></div>

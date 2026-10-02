@@ -1,0 +1,345 @@
+<?php
+// ============================================================
+// OreLog — Shared helper functions (PHP port of server/index.mjs)
+//
+// Provides: big integer math, timezone day helpers,
+//           daily allocation, SupportXMR polling, formatters.
+// ============================================================
+
+// ---------- Big-integer helpers (bcmath with fallback) ----------
+
+if (!function_exists('bcadd')) {
+    // Fallback for hosts without bcmath — safe for values under ~9.2e18
+    function bcadd($a, $b, $s = 0) { return (string)((int)$a + (int)$b); }
+    function bcsub($a, $b, $s = 0) { return (string)((int)$a - (int)$b); }
+    function bcmul($a, $b, $s = 0) { return (string)((int)$a * (int)$b); }
+    function bcdiv($a, $b, $s = 0) { return (string)intdiv((int)$a, (int)$b); }
+    function bccomp($a, $b, $s = 0) { return (int)$a <=> (int)$b; }
+}
+
+// ---------- Timezone / day-key helpers ----------
+
+/**
+ * Get the YYYY-MM-DD day key for a UNIX timestamp in a given timezone.
+ */
+function timeZoneDayKey(int $timestamp, string $timeZone): string {
+    $dt = new DateTime("@$timestamp");
+    $dt->setTimezone(new DateTimeZone($timeZone));
+    return $dt->format('Y-m-d');
+}
+
+/**
+ * Get the next calendar day key.
+ */
+function nextDayKey(string $dayKey): string {
+    $dt = new DateTime($dayKey);
+    $dt->modify('+1 day');
+    return $dt->format('Y-m-d');
+}
+
+/**
+ * Get the UNIX timestamp for midnight of a day in a given timezone.
+ */
+function dayStartTimestamp(string $dayKey, string $timeZone): int {
+    $dt = new DateTime($dayKey . ' 00:00:00', new DateTimeZone($timeZone));
+    return $dt->getTimestamp();
+}
+
+// ---------- Atomic conversion ----------
+
+/**
+ * Normalize a pool API value to an atomic (piconero) string.
+ */
+function toAtomic($value): string {
+    if (is_string($value) && preg_match('/^\d+$/', $value)) {
+        return $value;
+    }
+    $amount = floatval($value);
+    if (!is_finite($amount) || $amount < 0) {
+        throw new Exception('Pool returned an invalid XMR balance');
+    }
+    return (string)round($amount);
+}
+
+// ---------- Daily earnings allocation ----------
+
+/**
+ * Insert or update a day record — mirrors Node.js addDaySample.
+ */
+function addDaySample(PDO $db, string $dayKey, string $amount, string $recordedAt, bool $gap): void {
+    $gapVal = $gap ? 1 : 0;
+
+    // Ensure the row exists
+    $ins = $db->prepare(
+        "INSERT IGNORE INTO daily_records (day_key, earned_atomic, sample_count, gap_count, first_at, last_at)
+         VALUES (?, '0', 0, 0, ?, ?)"
+    );
+    $ins->execute([$dayKey, $recordedAt, $recordedAt]);
+
+    // Read current earned value
+    $sel = $db->prepare("SELECT earned_atomic FROM daily_records WHERE day_key = ?");
+    $sel->execute([$dayKey]);
+    $current = $sel->fetchColumn() ?: '0';
+
+    // Update with new totals
+    $newEarned = bcadd($current, $amount);
+    $upd = $db->prepare(
+        "UPDATE daily_records SET earned_atomic = ?, sample_count = sample_count + 1,
+         gap_count = gap_count + ?, last_at = ? WHERE day_key = ?"
+    );
+    $upd->execute([$newEarned, $gapVal, $recordedAt, $dayKey]);
+}
+
+/**
+ * Ensure a day row exists (for the first snapshot of a new day).
+ */
+function initializeDay(PDO $db, string $dayKey, string $recordedAt): void {
+    $stmt = $db->prepare(
+        "INSERT IGNORE INTO daily_records (day_key, earned_atomic, sample_count, gap_count, first_at, last_at)
+         VALUES (?, '0', 0, 0, ?, ?)"
+    );
+    $stmt->execute([$dayKey, $recordedAt, $recordedAt]);
+}
+
+/**
+ * Mark all days before dayKey as finalized.
+ */
+function finalizeBefore(PDO $db, string $dayKey): void {
+    $stmt = $db->prepare("UPDATE daily_records SET finalized = 1 WHERE day_key < ? AND finalized = 0");
+    $stmt->execute([$dayKey]);
+}
+
+/**
+ * Proportionally allocate a cumulative-balance delta across day boundaries.
+ * Direct port of Node.js allocateDelta().
+ */
+function allocateDelta(PDO $db, array $previous, array $current, string $timeZone): void {
+    $totalDelta = bcsub($current['cumulative_atomic'], $previous['cumulative_atomic']);
+    if (bccomp($totalDelta, '0') <= 0) return;
+
+    $startTs = strtotime($previous['recorded_at']);
+    $endTs   = strtotime($current['recorded_at']);
+    $duration = $endTs - $startTs;
+    if ($duration <= 0) return;
+
+    $gap       = $duration > 180; // > 3 minutes → gap
+    $remaining = $totalDelta;
+    $cursor    = $startTs;
+
+    while ($cursor < $endTs) {
+        $key      = timeZoneDayKey($cursor, $timeZone);
+        $boundary = dayStartTimestamp(nextDayKey($key), $timeZone);
+        $segEnd   = min($endTs, $boundary);
+        $segDur   = $segEnd - $cursor;
+
+        if ($segEnd === $endTs) {
+            $amount = $remaining;
+        } else {
+            $amount = bcdiv(bcmul($totalDelta, (string)$segDur), (string)$duration, 0);
+        }
+
+        addDaySample($db, $key, $amount, $current['recorded_at'], $gap);
+        $remaining = bcsub($remaining, $amount);
+        $cursor    = $segEnd;
+    }
+}
+
+// ---------- SupportXMR polling ----------
+
+/**
+ * Poll SupportXMR for the latest miner stats and worker data.
+ * Stores the snapshot and allocates daily earnings.
+ * Returns ['ok' => bool, ...] with status info.
+ */
+function doPoll(PDO $db): array {
+    // Read settings
+    $settings = $db->query("SELECT address, time_zone FROM settings WHERE id = 1")->fetch();
+    if (!$settings || empty($settings['address'])) {
+        return ['ok' => false, 'error' => 'No wallet configured'];
+    }
+
+    $address  = $settings['address'];
+    $timeZone = $settings['time_zone'] ?: 'UTC';
+
+    // ── Fetch miner stats ──
+    $ch = curl_init('https://www.supportxmr.com/api/miner/' . urlencode($address) . '/stats');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 12,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_USERAGENT      => 'OreLog/1.0',
+    ]);
+    $body     = curl_exec($ch);
+    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr  = curl_error($ch);
+    curl_close($ch);
+
+    if ($body === false || $httpCode !== 200) {
+        $err = $curlErr ?: "SupportXMR returned HTTP $httpCode";
+        $db->prepare("UPDATE poll_state SET last_error = ? WHERE id = 1")->execute([$err]);
+        return ['ok' => false, 'error' => $err];
+    }
+
+    $stats = json_decode($body, true, 512, JSON_BIGINT_AS_STRING);
+    if (!isset($stats['amtDue']) || !isset($stats['amtPaid'])) {
+        $err = 'SupportXMR did not return miner payment totals for this address';
+        $db->prepare("UPDATE poll_state SET last_error = ? WHERE id = 1")->execute([$err]);
+        return ['ok' => false, 'error' => $err];
+    }
+
+    $now        = gmdate('Y-m-d H:i:s');
+    $pending    = toAtomic($stats['amtDue']);
+    $paid       = toAtomic($stats['amtPaid']);
+    $cumulative = bcadd($pending, $paid);
+    $totalHash  = (string)max(0, intval($stats['totalHashes'] ?? 0));
+    $lastHash   = max(0, intval($stats['lastHash'] ?? 0));
+
+    // Insert snapshot
+    $stmt = $db->prepare(
+        "INSERT INTO snapshots (recorded_at, cumulative_atomic, pending_atomic, paid_atomic, total_hashes, last_hash_seconds)
+         VALUES (?, ?, ?, ?, ?, ?)"
+    );
+    $stmt->execute([$now, $cumulative, $pending, $paid, $totalHash, $lastHash]);
+
+    // ── Fetch active worker stats ──
+    $wch = curl_init('https://www.supportxmr.com/api/miner/' . urlencode($address) . '/stats/allWorkers');
+    curl_setopt_array($wch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 12,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_USERAGENT      => 'OreLog/1.0',
+    ]);
+    $wBody = curl_exec($wch);
+    curl_close($wch);
+
+    $activeWorkers = [];
+    if ($wBody) {
+        $workers = json_decode($wBody, true);
+        if (is_array($workers)) {
+            $idx = 0;
+            foreach ($workers as $key => $w) {
+                if (!is_array($w)) continue;
+                $name = (string)($w['name'] ?? $w['identifier'] ?? $w['id'] ?? (is_string($key) ? $key : 'worker-' . ($idx + 1)));
+                $hashrate = (float)($w['hashrate'] ?? $w['hash'] ?? $w['hashrate2'] ?? 0);
+                $lastShare = (int)($w['lastShare'] ?? $w['last_share'] ?? $w['lastHash'] ?? 0);
+                $totalHashes = (int)($w['totalHashes'] ?? $w['hashes'] ?? 0);
+                $activeWorkers[] = [
+                    'name'        => $name,
+                    'hashrate'    => $hashrate,
+                    'lastShare'   => $lastShare,
+                    'totalHashes' => $totalHashes,
+                ];
+                $idx++;
+            }
+        }
+    }
+
+    // ── Daily allocation ──
+    $prevStmt = $db->prepare(
+        "SELECT recorded_at, cumulative_atomic FROM snapshots WHERE recorded_at < ? ORDER BY recorded_at DESC LIMIT 1"
+    );
+    $prevStmt->execute([$now]);
+    $previous = $prevStmt->fetch();
+
+    if ($previous) {
+        $current = ['recorded_at' => $now, 'cumulative_atomic' => $cumulative];
+        allocateDelta($db, $previous, $current, $timeZone);
+    } else {
+        initializeDay($db, timeZoneDayKey(time(), $timeZone), $now);
+    }
+
+    finalizeBefore($db, timeZoneDayKey(time(), $timeZone));
+
+    // Update poll state with active workers json
+    $db->prepare("UPDATE poll_state SET last_poll_at = ?, last_error = NULL, active_workers = ? WHERE id = 1")
+       ->execute([$now, json_encode($activeWorkers)]);
+
+    return ['ok' => true, 'recordedAt' => $now];
+}
+
+// ---------- Response formatters ----------
+
+/**
+ * Format a snapshot DB row into the shape the React frontend expects.
+ */
+function formatSnapshot(?array $row): ?array {
+    if (!$row) return null;
+    return [
+        'recordedAt'      => gmdate('Y-m-d\TH:i:s\Z', strtotime($row['recorded_at'])),
+        'cumulativeAtomic' => $row['cumulative_atomic'],
+        'pendingAtomic'    => $row['pending_atomic'],
+        'paidAtomic'       => $row['paid_atomic'],
+        'totalHashes'      => $row['total_hashes'],
+        'lastHashSeconds'  => (int)$row['last_hash_seconds'],
+    ];
+}
+
+/**
+ * Format a daily_records row for the frontend.
+ */
+function formatDay(array $row): array {
+    return [
+        'dayKey'       => $row['day_key'],
+        'earnedAtomic' => $row['earned_atomic'],
+        'sampleCount'  => (int)$row['sample_count'],
+        'gapCount'     => (int)$row['gap_count'],
+        'finalized'    => (bool)$row['finalized'],
+    ];
+}
+
+/**
+ * Group flat worker_snapshot rows into the nested shape the frontend expects:
+ *   [ { recordedAt, workers: [ { identifier, cumulativeAtomic } ] } ]
+ */
+function groupWorkerSnapshots(array $rows): array {
+    $grouped = [];
+    foreach ($rows as $row) {
+        $at = gmdate('Y-m-d\TH:i:s\Z', strtotime($row['recorded_at']));
+        if (!isset($grouped[$at])) {
+            $grouped[$at] = ['recordedAt' => $at, 'workers' => []];
+        }
+        $grouped[$at]['workers'][] = [
+            'identifier'      => $row['identifier'],
+            'cumulativeAtomic' => $row['cumulative_atomic'],
+        ];
+    }
+    return array_values($grouped);
+}
+
+/**
+ * Downsample an array of formatted snapshots to one per time bucket.
+ * Keeps the first and last items intact.
+ */
+function downsampleSnapshots(array $arr, int $bucketMs): array {
+    if (count($arr) <= 2) return $arr;
+    $first  = $arr[0];
+    $last   = $arr[count($arr) - 1];
+    $middle = array_slice($arr, 1, -1);
+
+    $buckets = [];
+    foreach ($middle as $item) {
+        $at = strtotime($item['recordedAt']) * 1000;
+        $bucket = intdiv((int)$at, $bucketMs);
+        $buckets[$bucket] = $item;
+    }
+    return array_merge([$first], array_values($buckets), [$last]);
+}
+
+/**
+ * Downsample grouped worker snapshot arrays.
+ */
+function downsampleWorkers(array $arr, int $bucketMs): array {
+    if (count($arr) <= 2) return $arr;
+    $first  = $arr[0];
+    $last   = $arr[count($arr) - 1];
+    $middle = array_slice($arr, 1, -1);
+
+    $buckets = [];
+    foreach ($middle as $item) {
+        $at = strtotime($item['recordedAt']) * 1000;
+        $bucket = intdiv((int)$at, $bucketMs);
+        $buckets[$bucket] = $item;
+    }
+    return array_merge([$first], array_values($buckets), [$last]);
+}

@@ -539,18 +539,28 @@ async function pollPool() {
       totalHashes: String(Math.max(0, Number(stats.totalHashes) || 0)),
       lastHashSeconds: Math.max(0, Number(stats.lastHash) || 0),
     }
+    let workers = []
     let workerStats = []
     try {
       const workerResponse = await fetch(`https://www.supportxmr.com/api/miner/${encodeURIComponent(settings.address)}/stats/allWorkers`, { signal: AbortSignal.timeout(12_000) })
       if (workerResponse.ok) {
         const body = parseJson.parse(await workerResponse.text())
-        const entries = Array.isArray(body) ? body : Object.entries(body || {}).map(([identifier, value]) => ({ identifier, ...value }))
-        workerStats = entries.filter((worker) => worker && typeof worker === 'object').map((worker, index) => ({
-          identifier: String(worker.identifier ?? worker.id ?? worker.worker ?? (entries.length === 1 ? 'default' : `worker-${index + 1}`)) || 'default',
-          cumulativeAtomic: (BigInt(toAtomic(worker.amtDue ?? 0)) + BigInt(toAtomic(worker.amtPaid ?? 0))).toString(),
+        const entries = Array.isArray(body)
+          ? body
+          : Object.entries(body || {}).map(([key, value]) => ({ name: key, ...(typeof value === 'object' ? value : {}) }))
+        workers = entries.filter((worker) => worker && typeof worker === 'object').map((worker, index) => ({
+          name: String(worker.name ?? worker.identifier ?? worker.id ?? (entries.length === 1 ? 'default' : `worker-${index + 1}`)),
+          hashrate: Number(worker.hashrate ?? worker.hash ?? worker.hashrate2 ?? 0),
+          lastShare: Number(worker.lastShare ?? worker.last_share ?? worker.lastHash ?? 0),
+          totalHashes: Number(worker.totalHashes ?? worker.hashes ?? 0),
+        }))
+        workerStats = workers.map((w) => ({
+          identifier: w.name,
+          cumulativeAtomic: '0',
         }))
       }
     } catch (error) { console.warn('[workers] Unable to load worker stats:', error.message) }
+    state.workers = workers
     const previous = await store.latestSnapshot()
     await store.insertSnapshot(snapshot)
     if (workerStats.length) await store.insertWorkerSnapshot(recordedAt, workerStats)
@@ -606,7 +616,7 @@ app.get('/api/data', async (request, response) => {
       workerSnapshots = downsample(workerSnapshots)
     }
 
-    response.json({ settings, latest, snapshots, workerSnapshots, days, collector: state, serverTime: new Date(now).toISOString() })
+    response.json({ settings, latest, snapshots, workers: state.workers || [], workerSnapshots, days, collector: state, serverTime: new Date(now).toISOString() })
   } catch (error) {
     response.status(500).json({ error: error.message || 'Unable to load dashboard data' })
   }
