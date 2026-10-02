@@ -12,7 +12,7 @@
 [![License](https://img.shields.io/badge/License-MIT-acid?style=for-the-badge)](LICENSE)
 
 <p align="center">
-  <b>Self-hosted, gapless earnings analytics, live active miner telemetry, and zero-cost real-time fiat valuation (USD & INR).</b>
+  <b>Self-hosted, verified earnings analytics, live active miner telemetry, and zero-cost real-time fiat valuation (USD & INR).</b>
 </p>
 
 ---
@@ -25,7 +25,7 @@
 - 💵 **Real-Time Dual Fiat Conversion:** Instant live pricing in **USD ($)** and **INR (₹)** with dual API redundancy (CoinGecko & CoinPaprika) and smart caching (zero API keys needed).
 - ⛏️ **Active Miner Telemetry:** Real-time worker cards showing live status badges (`MINING` vs `IDLE`), current hashrates ($H/s$, $KH/s$, $MH/s$), and last share latency.
 - 📈 **Interactive Interval Analysis:** View earnings over **1 Hour**, **24 Hours**, **Today** (since local midnight), or custom intervals with instant hourly rate projections.
-- 🕒 **Timezone-Aware Daily Accounting:** Automatically splits and finalizes daily earnings at local midnight, allocating network gaps proportionally.
+- 🕒 **Timezone-Aware Daily Accounting:** Automatically finalizes daily earnings at local midnight based on verified active uptime.
 - 🔒 **100% Read-Only & Private:** Only calls public pool stats endpoints. No private keys, no seed phrases, no transaction capabilities.
 - 💾 **Data Ownership & Backup:** Single-click JSON exports by day or full history, with selective database pruning tools.
 - 🚀 **Universal Deployment:** Runs effortlessly on **Cloud VPS** (Oracle Cloud, DigitalOcean, AWS), **Shared Hosting / PHP** (InfinityFree, cPanel), **Docker**, or **Android / Termux**.
@@ -127,12 +127,16 @@ Open `http://127.0.0.1:3000` in your mobile browser.
 
 Monero pools utilize **PPLNS (Pay Per Last N Shares)**. When blocks are found, rewards are credited to your account balance (`amtDue`). When payout thresholds are reached, funds transfer to `amtPaid`.
 
-OreLog computes true earnings using cumulative balance snapshots:
-$$\text{Cumulative XMR} = \text{amtPaid} + \text{amtDue}$$
-$$\Delta \text{Earned} = \text{Cumulative}_{\text{current}} - \text{Cumulative}_{\text{previous}}$$
+OreLog computes true earnings by tracking cumulative pool balance snapshots:
 
-- **Gap Protection:** If monitoring stops temporarily (e.g. server restart), delta earnings across the gap are allocated proportionally across day boundaries.
-- **Real-Time Fiat:** Fiat approximations evaluate $\Delta \text{Earned} \times \text{Spot Price}$, updated every 5 minutes from CoinGecko / CoinPaprika.
+```text
+Cumulative XMR = amtPaid + amtDue
+Earned Delta   = Cumulative(current) - Cumulative(previous)
+```
+
+- **Payout-Proof:** When a payout occurs, `amtDue` decreases while `amtPaid` increases by the exact same amount—keeping your cumulative earnings continuous with zero false dips.
+- **Active Monitoring:** Earnings are only recorded from verified pool balance changes during active server uptime.
+- **Real-Time Fiat:** Live fiat conversions evaluate `Earned XMR × Spot Price`, updated every 5 minutes from CoinGecko / CoinPaprika.
 
 ---
 

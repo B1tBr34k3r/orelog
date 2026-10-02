@@ -110,8 +110,7 @@ function finalizeBefore(PDO $db, string $dayKey): void {
 }
 
 /**
- * Proportionally allocate a cumulative-balance delta across day boundaries.
- * Direct port of Node.js allocateDelta().
+ * Record a cumulative-balance delta during active monitoring.
  */
 function allocateDelta(PDO $db, array $previous, array $current, string $timeZone): void {
     $totalDelta = bcsub($current['cumulative_atomic'], $previous['cumulative_atomic']);
@@ -122,26 +121,13 @@ function allocateDelta(PDO $db, array $previous, array $current, string $timeZon
     $duration = $endTs - $startTs;
     if ($duration <= 0) return;
 
-    $gap       = $duration > 180; // > 3 minutes → gap
-    $remaining = $totalDelta;
-    $cursor    = $startTs;
-
-    while ($cursor < $endTs) {
-        $key      = timeZoneDayKey($cursor, $timeZone);
-        $boundary = dayStartTimestamp(nextDayKey($key), $timeZone);
-        $segEnd   = min($endTs, $boundary);
-        $segDur   = $segEnd - $cursor;
-
-        if ($segEnd === $endTs) {
-            $amount = $remaining;
-        } else {
-            $amount = bcdiv(bcmul($totalDelta, (string)$segDur), (string)$duration, 0);
-        }
-
-        addDaySample($db, $key, $amount, $current['recorded_at'], $gap);
-        $remaining = bcsub($remaining, $amount);
-        $cursor    = $segEnd;
+    // If server was offline (> 3 minutes), do not retroactively attribute offline delta
+    if ($duration > 180) {
+        return;
     }
+
+    $currentKey = timeZoneDayKey($endTs, $timeZone);
+    addDaySample($db, $currentKey, $totalDelta, $current['recorded_at'], false);
 }
 
 // ---------- SupportXMR polling ----------

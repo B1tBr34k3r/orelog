@@ -484,26 +484,20 @@ function dayStartTimestamp(dayKey, timeZone) {
 
 async function allocateDelta(previous, current, settings) {
   const totalDelta = BigInt(current.cumulativeAtomic) - BigInt(previous.cumulativeAtomic)
-  let remaining = totalDelta
-  if (remaining <= 0n) return
+  if (totalDelta <= 0n) return
 
   const start = Date.parse(previous.recordedAt)
   const end = Date.parse(current.recordedAt)
   const duration = end - start
   if (duration <= 0) return
-  const gap = duration > pollInterval * 3
-  let cursor = start
 
-  while (cursor < end) {
-    const key = timeZoneDayKey(cursor, settings.timeZone)
-    const boundary = dayStartTimestamp(nextDayKey(key), settings.timeZone)
-    const segmentEnd = Math.min(end, boundary)
-    const segmentDuration = BigInt(segmentEnd - cursor)
-    const amount = segmentEnd === end ? remaining : (totalDelta * segmentDuration) / BigInt(duration)
-    await store.addDaySample(key, amount, current.recordedAt, gap)
-    remaining -= amount
-    cursor = segmentEnd
+  // If server was offline for more than 3 polling cycles, do not retroactively attribute offline delta
+  if (duration > pollInterval * 3) {
+    return
   }
+
+  const currentKey = timeZoneDayKey(end, settings.timeZone)
+  await store.addDaySample(currentKey, totalDelta, current.recordedAt, false)
 }
 
 function toAtomic(value) {

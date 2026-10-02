@@ -626,7 +626,7 @@ function App() {
               <table className="daily-table">
                 <thead><tr><th>DAY</th><th>EARNED</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
                 <tbody>{(data?.days || []).slice(0, 8).map((day) => <tr key={day.dayKey}>
-                  <td><span className="day-date">{day.dayKey}</span><small>{day.sampleCount.toLocaleString()} samples{day.gapCount > 0 ? ` · ${day.gapCount} gaps` : ''}</small></td>
+                  <td><span className="day-date">{day.dayKey}</span><small>{day.sampleCount.toLocaleString()} samples</small></td>
                   <td className="daily-amount">
                     <div>{formatXmr(day.earnedAtomic)} <small>XMR</small></div>
                     {data?.fiat && (
@@ -646,7 +646,7 @@ function App() {
               </table>
               {!data?.days.length && <div className="table-empty">The daily log begins with your first pool snapshot.</div>}
             </div>
-            <p className="table-note"><ShieldCheck size={14} /> Daily totals are based on pool-reported balance changes. Gap periods are proportionally allocated and flagged.</p>
+            <p className="table-note"><ShieldCheck size={14} /> Daily totals are based on pool balance changes recorded during active monitoring.</p>
           </div>
 
           <aside className="status-panel">
