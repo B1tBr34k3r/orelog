@@ -554,15 +554,20 @@ async function pollPool() {
           ? body.map((w, i) => [w?.identifer || w?.identifier || w?.name || `worker-${i + 1}`, w])
           : Object.entries(body)
 
+        const nowSec = Math.floor(Date.now() / 1000)
         workers = entries.filter(([_, worker]) => worker && typeof worker === 'object').map(([key, worker], index) => {
           const rawName = String(worker.identifer || worker.identifier || worker.name || worker.id || key || (entries.length === 1 ? 'default' : `worker-${index + 1}`))
           const name = (rawName === 'global' && entries.length === 1) ? 'default' : rawName
-          const chartPoints = chartMap[key] || chartMap[rawName] || []
-          const latestChartHs = (Array.isArray(chartPoints) && chartPoints.length > 0) ? Number(chartPoints[0]?.hs || 0) : 0
-          const instantHs = Number(worker.hashrate ?? worker.hash ?? worker.hash2 ?? 0)
-          const hashrate = instantHs > 0 ? instantHs : latestChartHs
           const lastShare = Number(worker.lts ?? worker.lastShare ?? worker.last_share ?? worker.lastHash ?? stats.lastHash ?? 0)
           const totalHashes = Number(worker.totalHash ?? worker.totalHashes ?? worker.hashes ?? stats.totalHashes ?? 0)
+          const isRecent = lastShare > 0 && (nowSec - lastShare) < 600
+
+          const chartPoints = chartMap[key] || chartMap[rawName] || []
+          const latestPoint = Array.isArray(chartPoints) && chartPoints.length > 0 ? chartPoints[0] : null
+          const pointAgeSec = latestPoint?.ts ? Math.floor((Date.now() - latestPoint.ts) / 1000) : Infinity
+          const latestChartHs = (latestPoint && pointAgeSec < 600) ? Number(latestPoint.hs || 0) : 0
+          const instantHs = Number(worker.hashrate ?? worker.hash ?? worker.hash2 ?? 0)
+          const hashrate = isRecent ? (instantHs > 0 ? instantHs : latestChartHs) : 0
 
           return {
             name,
@@ -574,12 +579,20 @@ async function pollPool() {
       }
 
       if (workers.length === 0 && (Number(stats.lastHash) > 0 || Number(stats.totalHashes) > 0)) {
+        const nowSec = Math.floor(Date.now() / 1000)
+        const lastHashSec = Number(stats.lastHash || 0)
+        const isRecent = lastHashSec > 0 && (nowSec - lastHashSec) < 600
         const globalChart = chartMap['global'] || []
-        const latestChartHs = (Array.isArray(globalChart) && globalChart.length > 0) ? Number(globalChart[0]?.hs || 0) : Number(stats.hash || 0)
+        const latestPoint = Array.isArray(globalChart) && globalChart.length > 0 ? globalChart[0] : null
+        const pointAgeSec = latestPoint?.ts ? Math.floor((Date.now() - latestPoint.ts) / 1000) : Infinity
+        const latestChartHs = (latestPoint && pointAgeSec < 600) ? Number(latestPoint.hs || 0) : 0
+        const instantHs = Number(stats.hash || 0)
+        const hashrate = isRecent ? (instantHs > 0 ? instantHs : latestChartHs) : 0
+
         workers = [{
           name: 'default',
-          hashrate: latestChartHs,
-          lastShare: Number(stats.lastHash || 0),
+          hashrate,
+          lastShare: lastHashSec,
           totalHashes: Number(stats.totalHashes || 0),
         }]
       }

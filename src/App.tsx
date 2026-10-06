@@ -413,7 +413,7 @@ function App() {
   const onlineWorkersCount = useMemo(() => {
     return activeWorkers.filter((worker) => {
       const workerAge = worker.lastShare > 0 ? Math.max(0, Math.floor(clock / 1000) - worker.lastShare) : null
-      return (workerAge !== null && workerAge < 600) || worker.hashrate > 0
+      return workerAge !== null && workerAge < 600 && worker.hashrate > 0
     }).length
   }, [activeWorkers, clock])
 
@@ -655,7 +655,8 @@ function App() {
           <div className="worker-grid">
             {activeWorkers.map((worker) => {
               const workerAge = worker.lastShare > 0 ? Math.max(0, Math.floor(clock / 1000) - worker.lastShare) : null
-              const isOnline = (workerAge !== null && workerAge < 600) || worker.hashrate > 0
+              const isOnline = workerAge !== null && workerAge < 600 && worker.hashrate > 0
+              const currentHashrate = isOnline ? worker.hashrate : 0
               return (
                 <article className="worker-card" key={worker.name}>
                   <div className="worker-card-header">
@@ -670,7 +671,7 @@ function App() {
                   </div>
                   <div className="worker-stats">
                     <div className="worker-hashrate">
-                      {formatHashrate(worker.hashrate)}
+                      {formatHashrate(currentHashrate)}
                     </div>
                     <div className="worker-last-share">
                       {workerAge === null ? 'No shares yet' : `Last share ${formatAge(workerAge)} ago`}

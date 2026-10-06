@@ -215,6 +215,7 @@ function doPoll(PDO $db): array {
     }
 
     $activeWorkers = [];
+    $nowTs = time();
     if ($wBody) {
         $workers = json_decode($wBody, true);
         if (is_array($workers)) {
@@ -226,13 +227,16 @@ function doPoll(PDO $db): array {
                 $rawName = (string)($w['identifer'] ?? $w['identifier'] ?? $w['name'] ?? $w['id'] ?? ($isAssoc ? $key : 'worker-' . ($idx + 1)));
                 $name = ($rawName === 'global' && $count === 1) ? 'default' : $rawName;
                 
-                $chartPoints = $chartMap[$key] ?? $chartMap[$rawName] ?? [];
-                $latestChartHs = (is_array($chartPoints) && !empty($chartPoints)) ? (float)($chartPoints[0]['hs'] ?? 0) : 0;
-                $instantHs = (float)($w['hashrate'] ?? $w['hash'] ?? $w['hash2'] ?? 0);
-                $hashrate = $instantHs > 0 ? $instantHs : $latestChartHs;
-
                 $lastShare = (int)($w['lts'] ?? $w['lastShare'] ?? $w['last_share'] ?? $w['lastHash'] ?? $lastHash);
                 $totalH = (int)($w['totalHash'] ?? $w['totalHashes'] ?? $w['hashes'] ?? $totalHash);
+                $isRecent = $lastShare > 0 && ($nowTs - $lastShare) < 600;
+
+                $chartPoints = $chartMap[$key] ?? $chartMap[$rawName] ?? [];
+                $latestPoint = (is_array($chartPoints) && !empty($chartPoints)) ? $chartPoints[0] : null;
+                $pointAge = isset($latestPoint['ts']) ? (int)(($nowTs * 1000 - $latestPoint['ts']) / 1000) : 999999;
+                $latestChartHs = ($latestPoint && $pointAge < 600) ? (float)($latestPoint['hs'] ?? 0) : 0;
+                $instantHs = (float)($w['hashrate'] ?? $w['hash'] ?? $w['hash2'] ?? 0);
+                $hashrate = $isRecent ? ($instantHs > 0 ? $instantHs : $latestChartHs) : 0;
 
                 $activeWorkers[] = [
                     'name'        => $name,
@@ -246,11 +250,17 @@ function doPoll(PDO $db): array {
     }
 
     if (empty($activeWorkers) && ($lastHash > 0 || (int)$totalHash > 0)) {
+        $isRecent = $lastHash > 0 && ($nowTs - $lastHash) < 600;
         $globalChart = $chartMap['global'] ?? [];
-        $latestChartHs = (is_array($globalChart) && !empty($globalChart)) ? (float)($globalChart[0]['hs'] ?? 0) : (float)($stats['hash'] ?? 0);
+        $latestPoint = (is_array($globalChart) && !empty($globalChart)) ? $globalChart[0] : null;
+        $pointAge = isset($latestPoint['ts']) ? (int)(($nowTs * 1000 - $latestPoint['ts']) / 1000) : 999999;
+        $latestChartHs = ($latestPoint && $pointAge < 600) ? (float)($latestPoint['hs'] ?? 0) : 0;
+        $instantHs = (float)($stats['hash'] ?? 0);
+        $hashrate = $isRecent ? ($instantHs > 0 ? $instantHs : $latestChartHs) : 0;
+
         $activeWorkers[] = [
             'name'        => 'default',
-            'hashrate'    => $latestChartHs,
+            'hashrate'    => $hashrate,
             'lastShare'   => $lastHash,
             'totalHashes' => (int)$totalHash,
         ];
