@@ -536,23 +536,58 @@ async function pollPool() {
     let workers = []
     let workerStats = []
     try {
-      const workerResponse = await fetch(`https://www.supportxmr.com/api/miner/${encodeURIComponent(settings.address)}/stats/allWorkers`, { signal: AbortSignal.timeout(12_000) })
-      if (workerResponse.ok) {
-        const body = parseJson.parse(await workerResponse.text())
-        const entries = Array.isArray(body)
-          ? body
-          : Object.entries(body || {}).map(([key, value]) => ({ name: key, ...(typeof value === 'object' ? value : {}) }))
-        workers = entries.filter((worker) => worker && typeof worker === 'object').map((worker, index) => ({
-          name: String(worker.name ?? worker.identifier ?? worker.id ?? (entries.length === 1 ? 'default' : `worker-${index + 1}`)),
-          hashrate: Number(worker.hashrate ?? worker.hash ?? worker.hashrate2 ?? 0),
-          lastShare: Number(worker.lastShare ?? worker.last_share ?? worker.lastHash ?? 0),
-          totalHashes: Number(worker.totalHashes ?? worker.hashes ?? 0),
-        }))
-        workerStats = workers.map((w) => ({
-          identifier: w.name,
-          cumulativeAtomic: '0',
-        }))
+      const [workerResponse, chartResponse] = await Promise.all([
+        fetch(`https://www.supportxmr.com/api/miner/${encodeURIComponent(settings.address)}/stats/allWorkers`, { signal: AbortSignal.timeout(12_000) }),
+        fetch(`https://www.supportxmr.com/api/miner/${encodeURIComponent(settings.address)}/chart/hashrate/allWorkers`, { signal: AbortSignal.timeout(12_000) }).catch(() => null),
+      ])
+
+      let chartMap = {}
+      if (chartResponse && chartResponse.ok) {
+        try {
+          chartMap = parseJson.parse(await chartResponse.text()) || {}
+        } catch {}
       }
+
+      if (workerResponse && workerResponse.ok) {
+        const body = parseJson.parse(await workerResponse.text()) || {}
+        const entries = Array.isArray(body)
+          ? body.map((w, i) => [w?.identifer || w?.identifier || w?.name || `worker-${i + 1}`, w])
+          : Object.entries(body)
+
+        workers = entries.filter(([_, worker]) => worker && typeof worker === 'object').map(([key, worker], index) => {
+          const rawName = String(worker.identifer || worker.identifier || worker.name || worker.id || key || (entries.length === 1 ? 'default' : `worker-${index + 1}`))
+          const name = (rawName === 'global' && entries.length === 1) ? 'default' : rawName
+          const chartPoints = chartMap[key] || chartMap[rawName] || []
+          const latestChartHs = (Array.isArray(chartPoints) && chartPoints.length > 0) ? Number(chartPoints[0]?.hs || 0) : 0
+          const instantHs = Number(worker.hashrate ?? worker.hash ?? worker.hash2 ?? 0)
+          const hashrate = instantHs > 0 ? instantHs : latestChartHs
+          const lastShare = Number(worker.lts ?? worker.lastShare ?? worker.last_share ?? worker.lastHash ?? stats.lastHash ?? 0)
+          const totalHashes = Number(worker.totalHash ?? worker.totalHashes ?? worker.hashes ?? stats.totalHashes ?? 0)
+
+          return {
+            name,
+            hashrate,
+            lastShare,
+            totalHashes,
+          }
+        })
+      }
+
+      if (workers.length === 0 && (Number(stats.lastHash) > 0 || Number(stats.totalHashes) > 0)) {
+        const globalChart = chartMap['global'] || []
+        const latestChartHs = (Array.isArray(globalChart) && globalChart.length > 0) ? Number(globalChart[0]?.hs || 0) : Number(stats.hash || 0)
+        workers = [{
+          name: 'default',
+          hashrate: latestChartHs,
+          lastShare: Number(stats.lastHash || 0),
+          totalHashes: Number(stats.totalHashes || 0),
+        }]
+      }
+
+      workerStats = workers.map((w) => ({
+        identifier: w.name,
+        cumulativeAtomic: '0',
+      }))
     } catch (error) { console.warn('[workers] Unable to load worker stats:', error.message) }
     state.workers = workers
     const previous = await store.latestSnapshot()

@@ -188,7 +188,7 @@ function doPoll(PDO $db): array {
     );
     $stmt->execute([$now, $cumulative, $pending, $paid, $totalHash, $lastHash]);
 
-    // ── Fetch active worker stats ──
+    // ── Fetch active worker stats & chart hashrates ──
     $wch = curl_init('https://www.supportxmr.com/api/miner/' . urlencode($address) . '/stats/allWorkers');
     curl_setopt_array($wch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -199,26 +199,61 @@ function doPoll(PDO $db): array {
     $wBody = curl_exec($wch);
     curl_close($wch);
 
+    $cch = curl_init('https://www.supportxmr.com/api/miner/' . urlencode($address) . '/chart/hashrate/allWorkers');
+    curl_setopt_array($cch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 12,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_USERAGENT      => 'OreLog/1.0',
+    ]);
+    $cBody = curl_exec($cch);
+    curl_close($cch);
+
+    $chartMap = [];
+    if ($cBody) {
+        $chartMap = json_decode($cBody, true) ?: [];
+    }
+
     $activeWorkers = [];
     if ($wBody) {
         $workers = json_decode($wBody, true);
         if (is_array($workers)) {
+            $isAssoc = array_keys($workers) !== range(0, count($workers) - 1);
+            $count = count($workers);
             $idx = 0;
             foreach ($workers as $key => $w) {
                 if (!is_array($w)) continue;
-                $name = (string)($w['name'] ?? $w['identifier'] ?? $w['id'] ?? (is_string($key) ? $key : 'worker-' . ($idx + 1)));
-                $hashrate = (float)($w['hashrate'] ?? $w['hash'] ?? $w['hashrate2'] ?? 0);
-                $lastShare = (int)($w['lastShare'] ?? $w['last_share'] ?? $w['lastHash'] ?? 0);
-                $totalHashes = (int)($w['totalHashes'] ?? $w['hashes'] ?? 0);
+                $rawName = (string)($w['identifer'] ?? $w['identifier'] ?? $w['name'] ?? $w['id'] ?? ($isAssoc ? $key : 'worker-' . ($idx + 1)));
+                $name = ($rawName === 'global' && $count === 1) ? 'default' : $rawName;
+                
+                $chartPoints = $chartMap[$key] ?? $chartMap[$rawName] ?? [];
+                $latestChartHs = (is_array($chartPoints) && !empty($chartPoints)) ? (float)($chartPoints[0]['hs'] ?? 0) : 0;
+                $instantHs = (float)($w['hashrate'] ?? $w['hash'] ?? $w['hash2'] ?? 0);
+                $hashrate = $instantHs > 0 ? $instantHs : $latestChartHs;
+
+                $lastShare = (int)($w['lts'] ?? $w['lastShare'] ?? $w['last_share'] ?? $w['lastHash'] ?? $lastHash);
+                $totalH = (int)($w['totalHash'] ?? $w['totalHashes'] ?? $w['hashes'] ?? $totalHash);
+
                 $activeWorkers[] = [
                     'name'        => $name,
                     'hashrate'    => $hashrate,
                     'lastShare'   => $lastShare,
-                    'totalHashes' => $totalHashes,
+                    'totalHashes' => $totalH,
                 ];
                 $idx++;
             }
         }
+    }
+
+    if (empty($activeWorkers) && ($lastHash > 0 || (int)$totalHash > 0)) {
+        $globalChart = $chartMap['global'] ?? [];
+        $latestChartHs = (is_array($globalChart) && !empty($globalChart)) ? (float)($globalChart[0]['hs'] ?? 0) : (float)($stats['hash'] ?? 0);
+        $activeWorkers[] = [
+            'name'        => 'default',
+            'hashrate'    => $latestChartHs,
+            'lastShare'   => $lastHash,
+            'totalHashes' => (int)$totalHash,
+        ];
     }
 
     // ── Daily allocation ──
