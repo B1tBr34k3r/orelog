@@ -537,84 +537,89 @@ async function pollPool() {
     let workers = []
     let workerStats = []
     try {
-      const [workerResponse, chartResponse] = await Promise.all([
-        fetch(`https://www.supportxmr.com/api/miner/${encodeURIComponent(settings.address)}/stats/allWorkers`, { signal: AbortSignal.timeout(12_000) }),
+      const [workerResponse, chartResponse, identResponse] = await Promise.all([
+        fetch(`https://www.supportxmr.com/api/miner/${encodeURIComponent(settings.address)}/stats/allWorkers`, { signal: AbortSignal.timeout(12_000) }).catch(() => null),
         fetch(`https://www.supportxmr.com/api/miner/${encodeURIComponent(settings.address)}/chart/hashrate/allWorkers`, { signal: AbortSignal.timeout(12_000) }).catch(() => null),
+        fetch(`https://www.supportxmr.com/api/miner/${encodeURIComponent(settings.address)}/identifiers`, { signal: AbortSignal.timeout(12_000) }).catch(() => null),
       ])
 
       let chartMap = {}
       if (chartResponse && chartResponse.ok) {
+        try { chartMap = parseJson.parse(await chartResponse.text()) || {} } catch {}
+      }
+
+      let allWorkersMap = {}
+      if (workerResponse && workerResponse.ok) {
         try {
-          chartMap = parseJson.parse(await chartResponse.text()) || {}
+          const body = parseJson.parse(await workerResponse.text()) || {}
+          if (Array.isArray(body)) {
+            for (let i = 0; i < body.length; i++) {
+              const item = body[i]
+              const k = item?.identifer || item?.identifier || item?.name || `worker-${i + 1}`
+              allWorkersMap[k] = item
+            }
+          } else if (typeof body === 'object' && body !== null) {
+            allWorkersMap = body
+          }
+        } catch {}
+      }
+
+      let idents = []
+      if (identResponse && identResponse.ok) {
+        try {
+          const body = parseJson.parse(await identResponse.text())
+          if (Array.isArray(body)) idents = body.map(String)
         } catch {}
       }
 
       const nowSec = Math.floor(Date.now() / 1000)
-      if (workerResponse && workerResponse.ok) {
-        const body = parseJson.parse(await workerResponse.text()) || {}
-        const entries = Array.isArray(body)
-          ? body.map((w, i) => [w?.identifer || w?.identifier || w?.name || `worker-${i + 1}`, w])
-          : Object.entries(body)
+      const rawWorkerNames = new Set([
+        ...idents,
+        ...Object.keys(chartMap || {}),
+        ...Object.keys(allWorkersMap || {}),
+      ])
 
-        const hasNamedWorkers = entries.some(([k, w]) => {
-          const raw = String(w?.identifer || w?.identifier || w?.name || w?.id || k || '')
-          return raw !== '' && raw !== 'global' && raw !== 'default'
-        })
+      const namedWorkers = Array.from(rawWorkerNames).filter((n) => n && n !== 'global' && n !== 'default')
 
-        if (hasNamedWorkers && knownWorkers.has('default')) {
-          knownWorkers.delete('default')
-        }
+      if (namedWorkers.length > 0) {
+        if (knownWorkers.has('default')) knownWorkers.delete('default')
+        if (knownWorkers.has('global')) knownWorkers.delete('global')
 
-        for (const [key, worker] of entries) {
-          if (!worker || typeof worker !== 'object') continue
-          const rawName = String(worker.identifer || worker.identifier || worker.name || worker.id || key || '')
-          if (!rawName) continue
-
-          if (rawName === 'global') {
-            if (hasNamedWorkers || knownWorkers.size > 0) {
-              continue
-            }
-          }
-
-          const name = rawName === 'global' ? 'default' : rawName
-          if (name !== 'default' && knownWorkers.has('default')) {
-            knownWorkers.delete('default')
-          }
-
-          const lastShare = Number(worker.lts ?? worker.lastShare ?? worker.last_share ?? worker.lastHash ?? stats.lastHash ?? 0)
-          const totalHashes = Number(worker.totalHash ?? worker.totalHashes ?? worker.hashes ?? stats.totalHashes ?? 0)
-          const isRecent = lastShare > 0 && (nowSec - lastShare) < 600
-
-          const chartPoints = chartMap[key] || chartMap[rawName] || []
+        for (const wName of namedWorkers) {
+          const wStats = allWorkersMap[wName] || {}
+          const chartPoints = chartMap[wName] || []
           const latestPoint = Array.isArray(chartPoints) && chartPoints.length > 0 ? chartPoints[0] : null
           const chartHs = latestPoint ? Number(latestPoint.hs || 0) : 0
-          const instantHs = Number(worker.hashrate ?? worker.hash ?? worker.hash2 ?? 0)
+          const instantHs = Number(wStats.hashrate ?? wStats.hash ?? wStats.hash2 ?? 0)
+          const lastShare = Number(wStats.lts ?? wStats.lastShare ?? wStats.last_share ?? wStats.lastHash ?? (latestPoint ? Math.floor(latestPoint.ts / 1000) : stats.lastHash) ?? 0)
+          const totalHashes = Number(wStats.totalHash ?? wStats.totalHashes ?? wStats.hashes ?? 0)
+          const isRecent = lastShare > 0 && (nowSec - lastShare) < 600
           const hashrate = isRecent ? (instantHs > 0 ? instantHs : chartHs) : 0
 
-          const existing = knownWorkers.get(name)
-          knownWorkers.set(name, {
-            name,
+          const existing = knownWorkers.get(wName)
+          knownWorkers.set(wName, {
+            name: wName,
             hashrate,
             lastShare: lastShare > 0 ? lastShare : (existing?.lastShare || 0),
             totalHashes: totalHashes > 0 ? totalHashes : (existing?.totalHashes || 0),
           })
         }
-      }
-
-      if (knownWorkers.size === 0 && (Number(stats.lastHash) > 0 || Number(stats.totalHashes) > 0)) {
-        const lastHashSec = Number(stats.lastHash || 0)
-        const isRecent = lastHashSec > 0 && (nowSec - lastHashSec) < 600
+      } else if (knownWorkers.size === 0) {
+        const globalW = allWorkersMap['global'] || {}
         const globalChart = chartMap['global'] || []
         const latestPoint = Array.isArray(globalChart) && globalChart.length > 0 ? globalChart[0] : null
         const chartHs = latestPoint ? Number(latestPoint.hs || 0) : 0
-        const instantHs = Number(stats.hash || 0)
+        const instantHs = Number(globalW.hashrate ?? globalW.hash ?? stats.hash ?? 0)
+        const lastShare = Number(globalW.lts ?? globalW.lastShare ?? stats.lastHash ?? 0)
+        const totalHashes = Number(globalW.totalHash ?? globalW.totalHashes ?? stats.totalHashes ?? 0)
+        const isRecent = lastShare > 0 && (nowSec - lastShare) < 600
         const hashrate = isRecent ? (instantHs > 0 ? instantHs : chartHs) : 0
 
         knownWorkers.set('default', {
           name: 'default',
           hashrate,
-          lastShare: lastHashSec,
-          totalHashes: Number(stats.totalHashes || 0),
+          lastShare,
+          totalHashes,
         })
       }
 

@@ -188,7 +188,7 @@ function doPoll(PDO $db): array {
     );
     $stmt->execute([$now, $cumulative, $pending, $paid, $totalHash, $lastHash]);
 
-    // ── Fetch active worker stats & chart hashrates ──
+    // ── Fetch active worker stats, chart hashrates & identifiers ──
     $wch = curl_init('https://www.supportxmr.com/api/miner/' . urlencode($address) . '/stats/allWorkers');
     curl_setopt_array($wch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -209,9 +209,41 @@ function doPoll(PDO $db): array {
     $cBody = curl_exec($cch);
     curl_close($cch);
 
+    $ich = curl_init('https://www.supportxmr.com/api/miner/' . urlencode($address) . '/identifiers');
+    curl_setopt_array($ich, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 12,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_USERAGENT      => 'OreLog/1.0',
+    ]);
+    $iBody = curl_exec($ich);
+    curl_close($ich);
+
     $chartMap = [];
     if ($cBody) {
         $chartMap = json_decode($cBody, true) ?: [];
+    }
+
+    $allWorkersMap = [];
+    if ($wBody) {
+        $parsedW = json_decode($wBody, true);
+        if (is_array($parsedW)) {
+            $isAssoc = array_keys($parsedW) !== range(0, count($parsedW) - 1);
+            if ($isAssoc) {
+                $allWorkersMap = $parsedW;
+            } else {
+                foreach ($parsedW as $idx => $item) {
+                    $k = $item['identifer'] ?? $item['identifier'] ?? $item['name'] ?? ('worker-' . ($idx + 1));
+                    $allWorkersMap[$k] = $item;
+                }
+            }
+        }
+    }
+
+    $idents = [];
+    if ($iBody) {
+        $parsedI = json_decode($iBody, true);
+        if (is_array($parsedI)) $idents = $parsedI;
     }
 
     // Read previous known workers
@@ -227,74 +259,57 @@ function doPoll(PDO $db): array {
     }
 
     $nowTs = time();
-    if ($wBody) {
-        $workers = json_decode($wBody, true);
-        if (is_array($workers)) {
-            $isAssoc = array_keys($workers) !== range(0, count($workers) - 1);
-            $hasNamed = false;
-            foreach ($workers as $k => $w) {
-                $raw = (string)($w['identifer'] ?? $w['identifier'] ?? $w['name'] ?? $w['id'] ?? $k ?? '');
-                if ($raw !== '' && $raw !== 'global' && $raw !== 'default') { $hasNamed = true; break; }
-            }
+    $rawNames = array_unique(array_merge(
+        $idents,
+        array_keys($chartMap),
+        array_keys($allWorkersMap)
+    ));
 
-            if ($hasNamed && isset($knownWorkers['default'])) {
-                unset($knownWorkers['default']);
-            }
+    $namedWorkers = array_filter($rawNames, function($n) {
+        return $n !== '' && $n !== 'global' && $n !== 'default';
+    });
 
-            $idx = 0;
-            foreach ($workers as $key => $w) {
-                if (!is_array($w)) continue;
-                $rawName = (string)($w['identifer'] ?? $w['identifier'] ?? $w['name'] ?? $w['id'] ?? ($isAssoc ? $key : ''));
-                if ($rawName === '') continue;
+    if (!empty($namedWorkers)) {
+        unset($knownWorkers['default']);
+        unset($knownWorkers['global']);
 
-                if ($rawName === 'global') {
-                    if ($hasNamed || !empty($knownWorkers)) {
-                        continue;
-                    }
-                }
+        foreach ($namedWorkers as $wName) {
+            $wStats = $allWorkersMap[$wName] ?? [];
+            $chartPoints = $chartMap[$wName] ?? [];
+            $latestPoint = (is_array($chartPoints) && !empty($chartPoints)) ? $chartPoints[0] : null;
+            $latestChartHs = $latestPoint ? (float)($latestPoint['hs'] ?? 0) : 0;
+            $instantHs = (float)($wStats['hashrate'] ?? $wStats['hash'] ?? $wStats['hash2'] ?? 0);
+            $lastShare = (int)($wStats['lts'] ?? $wStats['lastShare'] ?? $wStats['last_share'] ?? $wStats['lastHash'] ?? (isset($latestPoint['ts']) ? (int)($latestPoint['ts'] / 1000) : $lastHash));
+            $totalH = (int)($wStats['totalHash'] ?? $wStats['totalHashes'] ?? $wStats['hashes'] ?? 0);
+            $isRecent = $lastShare > 0 && ($nowTs - $lastShare) < 600;
+            $hashrate = $isRecent ? ($instantHs > 0 ? instantHs : $latestChartHs) : 0;
 
-                $name = $rawName === 'global' ? 'default' : $rawName;
-                if ($name !== 'default' && isset($knownWorkers['default'])) {
-                    unset($knownWorkers['default']);
-                }
-                
-                $lastShare = (int)($w['lts'] ?? $w['lastShare'] ?? $w['last_share'] ?? $w['lastHash'] ?? $lastHash);
-                $totalH = (int)($w['totalHash'] ?? $w['totalHashes'] ?? $w['hashes'] ?? $totalHash);
-                $isRecent = $lastShare > 0 && ($nowTs - $lastShare) < 600;
+            $prevLast = $knownWorkers[$wName]['lastShare'] ?? 0;
+            $prevTot = $knownWorkers[$wName]['totalHashes'] ?? 0;
 
-                $chartPoints = $chartMap[$key] ?? $chartMap[$rawName] ?? [];
-                $latestPoint = (is_array($chartPoints) && !empty($chartPoints)) ? $chartPoints[0] : null;
-                $latestChartHs = $latestPoint ? (float)($latestPoint['hs'] ?? 0) : 0;
-                $instantHs = (float)($w['hashrate'] ?? $w['hash'] ?? $w['hash2'] ?? 0);
-                $hashrate = $isRecent ? ($instantHs > 0 ? instantHs : $latestChartHs) : 0;
-
-                $prevLast = $knownWorkers[$name]['lastShare'] ?? 0;
-                $prevTot = $knownWorkers[$name]['totalHashes'] ?? 0;
-
-                $knownWorkers[$name] = [
-                    'name'        => $name,
-                    'hashrate'    => $hashrate,
-                    'lastShare'   => $lastShare > 0 ? $lastShare : $prevLast,
-                    'totalHashes' => $totalH > 0 ? $totalH : $prevTot,
-                ];
-                $idx++;
-            }
+            $knownWorkers[$wName] = [
+                'name'        => $wName,
+                'hashrate'    => $hashrate,
+                'lastShare'   => $lastShare > 0 ? $lastShare : $prevLast,
+                'totalHashes' => $totalH > 0 ? $totalH : $prevTot,
+            ];
         }
-    }
-
-    if (empty($knownWorkers) && ($lastHash > 0 || (int)$totalHash > 0)) {
-        $isRecent = $lastHash > 0 && ($nowTs - $lastHash) < 600;
+    } else if (empty($knownWorkers)) {
+        $globalW = $allWorkersMap['global'] ?? [];
         $globalChart = $chartMap['global'] ?? [];
         $latestPoint = (is_array($globalChart) && !empty($globalChart)) ? $globalChart[0] : null;
         $latestChartHs = $latestPoint ? (float)($latestPoint['hs'] ?? 0) : 0;
-        $instantHs = (float)($stats['hash'] ?? 0);
+        $instantHs = (float)($globalW['hashrate'] ?? $globalW['hash'] ?? $stats['hash'] ?? 0);
+        $lastShare = (int)($globalW['lts'] ?? $globalW['lastShare'] ?? $stats['lastHash'] ?? 0);
+        $totalH = (int)($globalW['totalHash'] ?? $globalW['totalHashes'] ?? $totalHash);
+        $isRecent = $lastShare > 0 && ($nowTs - $lastShare) < 600;
         $hashrate = $isRecent ? ($instantHs > 0 ? instantHs : $latestChartHs) : 0;
 
         $knownWorkers['default'] = [
             'name'        => 'default',
             'hashrate'    => $hashrate,
-            'lastShare'   => $lastHash,
-            'totalHashes' => (int)$totalHash,
+            'lastShare'   => $lastShare,
+            'totalHashes' => $totalH,
         ];
     }
 
