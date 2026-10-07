@@ -55,6 +55,20 @@ class JsonlStore {
     return this.memory.settings
   }
 
+  async getKnownWorkers() {
+    try {
+      return JSON.parse(await readFile(path.join(this.dir, 'known_workers.json'), 'utf8'))
+    } catch {
+      return []
+    }
+  }
+
+  async saveKnownWorkers(workers) {
+    try {
+      await writeFile(path.join(this.dir, 'known_workers.json'), JSON.stringify(workers, null, 2))
+    } catch {}
+  }
+
   async saveSettings(settings) {
     const previous = this.memory.settings
     const reset = Boolean(previous && (previous.address !== settings.address || previous.timeZone !== settings.timeZone))
@@ -68,6 +82,7 @@ class JsonlStore {
       await writeFile(path.join(this.dir, 'snapshots.jsonl'), '')
       await writeFile(path.join(this.dir, 'worker_snapshots.jsonl'), '')
       await writeFile(path.join(this.dir, 'days.json'), '[]')
+      await this.saveKnownWorkers([])
     }
     return reset
   }
@@ -258,6 +273,26 @@ class PostgresStore {
   async getSettings() {
     const { rows } = await this.pool.query('SELECT address, time_zone FROM dashboard_settings WHERE id = 1')
     return rows[0] ? { address: rows[0].address, timeZone: rows[0].time_zone } : null
+  }
+
+  async getKnownWorkers() {
+    try {
+      await this.pool.query('CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT)')
+      const { rows } = await this.pool.query("SELECT value FROM app_state WHERE key = 'known_workers'")
+      return rows[0] ? JSON.parse(rows[0].value) : []
+    } catch {
+      return []
+    }
+  }
+
+  async saveKnownWorkers(workers) {
+    try {
+      await this.pool.query('CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT)')
+      await this.pool.query(
+        "INSERT INTO app_state (key, value) VALUES ('known_workers', $1) ON CONFLICT (key) DO UPDATE SET value = $1",
+        [JSON.stringify(workers)]
+      )
+    } catch {}
   }
 
   async saveSettings(settings) {
@@ -642,6 +677,7 @@ async function pollPool() {
       }
 
       workers = Array.from(knownWorkers.values())
+      await store.saveKnownWorkers(workers)
       workerStats = workers.map((w) => ({
         identifier: w.name,
         cumulativeAtomic: '0',
@@ -846,6 +882,17 @@ if (pool) {
   await store.init()
   console.info('[storage] Pure-JS JSONL database connected. Configured DATABASE_URL is empty.')
 }
+
+try {
+  const persisted = await store.getKnownWorkers()
+  if (Array.isArray(persisted)) {
+    for (const w of persisted) {
+      if (w && w.name && w.name !== 'default' && w.name !== 'global') {
+        knownWorkers.set(w.name, w)
+      }
+    }
+  }
+} catch {}
 
 const builtClient = path.join(root, 'dist')
 app.use(express.static(builtClient))
