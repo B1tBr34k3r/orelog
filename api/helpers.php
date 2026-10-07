@@ -275,12 +275,28 @@ function doPoll(PDO $db): array {
 
         foreach ($namedWorkers as $wName) {
             $wStats = $allWorkersMap[$wName] ?? [];
+            if (empty($wStats['totalHash']) && count($namedWorkers) <= 6) {
+                $swch = curl_init('https://www.supportxmr.com/api/miner/' . urlencode($address) . '/stats/' . urlencode($wName));
+                curl_setopt_array($swch, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_TIMEOUT        => 5,
+                    CURLOPT_CONNECTTIMEOUT => 3,
+                    CURLOPT_USERAGENT      => 'OreLog/1.0',
+                ]);
+                $swBody = curl_exec($swch);
+                curl_close($swch);
+                if ($swBody) {
+                    $swData = json_decode($swBody, true);
+                    if (is_array($swData)) $wStats = array_merge($wStats, $swData);
+                }
+            }
+
             $chartPoints = $chartMap[$wName] ?? [];
             $latestPoint = (is_array($chartPoints) && !empty($chartPoints)) ? $chartPoints[0] : null;
             $latestChartHs = $latestPoint ? (float)($latestPoint['hs'] ?? 0) : 0;
             $instantHs = (float)($wStats['hashrate'] ?? $wStats['hash'] ?? $wStats['hash2'] ?? 0);
             $lastShare = (int)($wStats['lts'] ?? $wStats['lastShare'] ?? $wStats['last_share'] ?? $wStats['lastHash'] ?? (isset($latestPoint['ts']) ? (int)($latestPoint['ts'] / 1000) : $lastHash));
-            $totalH = (int)($wStats['totalHash'] ?? $wStats['totalHashes'] ?? $wStats['hashes'] ?? 0);
+            $totalH = (int)($wStats['totalHash'] ?? $wStats['totalHashes'] ?? $wStats['hashes'] ?? (count($namedWorkers) === 1 ? (int)$totalHash : 0));
             $isRecent = $lastShare > 0 && ($nowTs - $lastShare) < 600;
             $hashrate = $isRecent ? ($instantHs > 0 ? instantHs : $latestChartHs) : 0;
 

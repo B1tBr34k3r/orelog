@@ -586,13 +586,23 @@ async function pollPool() {
         if (knownWorkers.has('global')) knownWorkers.delete('global')
 
         for (const wName of namedWorkers) {
-          const wStats = allWorkersMap[wName] || {}
+          let wStats = allWorkersMap[wName] || {}
+          if (!wStats.totalHash && namedWorkers.length <= 6) {
+            try {
+              const singleRes = await fetch(`https://www.supportxmr.com/api/miner/${encodeURIComponent(settings.address)}/stats/${encodeURIComponent(wName)}`, { signal: AbortSignal.timeout(5000) })
+              if (singleRes.ok) {
+                const singleData = parseJson.parse(await singleRes.text()) || {}
+                wStats = { ...wStats, ...singleData }
+              }
+            } catch {}
+          }
+
           const chartPoints = chartMap[wName] || []
           const latestPoint = Array.isArray(chartPoints) && chartPoints.length > 0 ? chartPoints[0] : null
           const chartHs = latestPoint ? Number(latestPoint.hs || 0) : 0
           const instantHs = Number(wStats.hashrate ?? wStats.hash ?? wStats.hash2 ?? 0)
           const lastShare = Number(wStats.lts ?? wStats.lastShare ?? wStats.last_share ?? wStats.lastHash ?? (latestPoint ? Math.floor(latestPoint.ts / 1000) : stats.lastHash) ?? 0)
-          const totalHashes = Number(wStats.totalHash ?? wStats.totalHashes ?? wStats.hashes ?? 0)
+          const totalHashes = Number(wStats.totalHash ?? wStats.totalHashes ?? wStats.hashes ?? (namedWorkers.length === 1 ? stats.totalHashes : 0))
           const isRecent = lastShare > 0 && (nowSec - lastShare) < 600
           const hashrate = isRecent ? (instantHs > 0 ? instantHs : chartHs) : 0
 
