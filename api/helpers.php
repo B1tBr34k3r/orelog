@@ -234,16 +234,28 @@ function doPoll(PDO $db): array {
             $hasNamed = false;
             foreach ($workers as $k => $w) {
                 $raw = (string)($w['identifer'] ?? $w['identifier'] ?? $w['name'] ?? $w['id'] ?? $k ?? '');
-                if ($raw !== '' && $raw !== 'global') { $hasNamed = true; break; }
+                if ($raw !== '' && $raw !== 'global' && $raw !== 'default') { $hasNamed = true; break; }
+            }
+
+            if ($hasNamed && isset($knownWorkers['default'])) {
+                unset($knownWorkers['default']);
             }
 
             $idx = 0;
             foreach ($workers as $key => $w) {
                 if (!is_array($w)) continue;
-                $rawName = (string)($w['identifer'] ?? $w['identifier'] ?? $w['name'] ?? $w['id'] ?? ($isAssoc ? $key : 'worker-' . ($idx + 1)));
-                $name = ($rawName === 'global' && !$hasNamed && count($knownWorkers) <= 1) ? 'default' : $rawName;
-                if ($name === 'global' && !empty($knownWorkers) && !isset($knownWorkers['global'])) {
-                    continue;
+                $rawName = (string)($w['identifer'] ?? $w['identifier'] ?? $w['name'] ?? $w['id'] ?? ($isAssoc ? $key : ''));
+                if ($rawName === '') continue;
+
+                if ($rawName === 'global') {
+                    if ($hasNamed || !empty($knownWorkers)) {
+                        continue;
+                    }
+                }
+
+                $name = $rawName === 'global' ? 'default' : $rawName;
+                if ($name !== 'default' && isset($knownWorkers['default'])) {
+                    unset($knownWorkers['default']);
                 }
                 
                 $lastShare = (int)($w['lts'] ?? $w['lastShare'] ?? $w['last_share'] ?? $w['lastHash'] ?? $lastHash);

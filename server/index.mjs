@@ -558,15 +558,27 @@ async function pollPool() {
 
         const hasNamedWorkers = entries.some(([k, w]) => {
           const raw = String(w?.identifer || w?.identifier || w?.name || w?.id || k || '')
-          return raw !== '' && raw !== 'global'
+          return raw !== '' && raw !== 'global' && raw !== 'default'
         })
+
+        if (hasNamedWorkers && knownWorkers.has('default')) {
+          knownWorkers.delete('default')
+        }
 
         for (const [key, worker] of entries) {
           if (!worker || typeof worker !== 'object') continue
-          const rawName = String(worker.identifer || worker.identifier || worker.name || worker.id || key || (entries.length === 1 ? 'default' : `worker-${entries.indexOf(worker) + 1}`))
-          const name = (rawName === 'global' && !hasNamedWorkers && knownWorkers.size <= 1) ? 'default' : rawName
-          if (name === 'global' && knownWorkers.size > 0 && !knownWorkers.has('global')) {
-            continue
+          const rawName = String(worker.identifer || worker.identifier || worker.name || worker.id || key || '')
+          if (!rawName) continue
+
+          if (rawName === 'global') {
+            if (hasNamedWorkers || knownWorkers.size > 0) {
+              continue
+            }
+          }
+
+          const name = rawName === 'global' ? 'default' : rawName
+          if (name !== 'default' && knownWorkers.has('default')) {
+            knownWorkers.delete('default')
           }
 
           const lastShare = Number(worker.lts ?? worker.lastShare ?? worker.last_share ?? worker.lastHash ?? stats.lastHash ?? 0)
