@@ -447,6 +447,7 @@ class PostgresStore {
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null
 const store = pool ? new PostgresStore(pool) : new JsonlStore()
 const state = { lastPollAt: null, lastError: null, isPolling: false }
+const knownWorkers = new Map()
 
 function timeZoneDayKey(timestamp, timeZone) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -548,55 +549,72 @@ async function pollPool() {
         } catch {}
       }
 
+      const nowSec = Math.floor(Date.now() / 1000)
       if (workerResponse && workerResponse.ok) {
         const body = parseJson.parse(await workerResponse.text()) || {}
         const entries = Array.isArray(body)
           ? body.map((w, i) => [w?.identifer || w?.identifier || w?.name || `worker-${i + 1}`, w])
           : Object.entries(body)
 
-        const nowSec = Math.floor(Date.now() / 1000)
-        workers = entries.filter(([_, worker]) => worker && typeof worker === 'object').map(([key, worker], index) => {
-          const rawName = String(worker.identifer || worker.identifier || worker.name || worker.id || key || (entries.length === 1 ? 'default' : `worker-${index + 1}`))
-          const name = (rawName === 'global' && entries.length === 1) ? 'default' : rawName
+        const hasNamedWorkers = entries.some(([k, w]) => {
+          const raw = String(w?.identifer || w?.identifier || w?.name || w?.id || k || '')
+          return raw !== '' && raw !== 'global'
+        })
+
+        for (const [key, worker] of entries) {
+          if (!worker || typeof worker !== 'object') continue
+          const rawName = String(worker.identifer || worker.identifier || worker.name || worker.id || key || (entries.length === 1 ? 'default' : `worker-${entries.indexOf(worker) + 1}`))
+          const name = (rawName === 'global' && !hasNamedWorkers && knownWorkers.size <= 1) ? 'default' : rawName
+          if (name === 'global' && knownWorkers.size > 0 && !knownWorkers.has('global')) {
+            continue
+          }
+
           const lastShare = Number(worker.lts ?? worker.lastShare ?? worker.last_share ?? worker.lastHash ?? stats.lastHash ?? 0)
           const totalHashes = Number(worker.totalHash ?? worker.totalHashes ?? worker.hashes ?? stats.totalHashes ?? 0)
           const isRecent = lastShare > 0 && (nowSec - lastShare) < 600
 
           const chartPoints = chartMap[key] || chartMap[rawName] || []
           const latestPoint = Array.isArray(chartPoints) && chartPoints.length > 0 ? chartPoints[0] : null
-          const pointAgeSec = latestPoint?.ts ? Math.floor((Date.now() - latestPoint.ts) / 1000) : Infinity
-          const latestChartHs = (latestPoint && pointAgeSec < 600) ? Number(latestPoint.hs || 0) : 0
+          const chartHs = latestPoint ? Number(latestPoint.hs || 0) : 0
           const instantHs = Number(worker.hashrate ?? worker.hash ?? worker.hash2 ?? 0)
-          const hashrate = isRecent ? (instantHs > 0 ? instantHs : latestChartHs) : 0
+          const hashrate = isRecent ? (instantHs > 0 ? instantHs : chartHs) : 0
 
-          return {
+          const existing = knownWorkers.get(name)
+          knownWorkers.set(name, {
             name,
             hashrate,
-            lastShare,
-            totalHashes,
-          }
-        })
+            lastShare: lastShare > 0 ? lastShare : (existing?.lastShare || 0),
+            totalHashes: totalHashes > 0 ? totalHashes : (existing?.totalHashes || 0),
+          })
+        }
       }
 
-      if (workers.length === 0 && (Number(stats.lastHash) > 0 || Number(stats.totalHashes) > 0)) {
-        const nowSec = Math.floor(Date.now() / 1000)
+      if (knownWorkers.size === 0 && (Number(stats.lastHash) > 0 || Number(stats.totalHashes) > 0)) {
         const lastHashSec = Number(stats.lastHash || 0)
         const isRecent = lastHashSec > 0 && (nowSec - lastHashSec) < 600
         const globalChart = chartMap['global'] || []
         const latestPoint = Array.isArray(globalChart) && globalChart.length > 0 ? globalChart[0] : null
-        const pointAgeSec = latestPoint?.ts ? Math.floor((Date.now() - latestPoint.ts) / 1000) : Infinity
-        const latestChartHs = (latestPoint && pointAgeSec < 600) ? Number(latestPoint.hs || 0) : 0
+        const chartHs = latestPoint ? Number(latestPoint.hs || 0) : 0
         const instantHs = Number(stats.hash || 0)
-        const hashrate = isRecent ? (instantHs > 0 ? instantHs : latestChartHs) : 0
+        const hashrate = isRecent ? (instantHs > 0 ? instantHs : chartHs) : 0
 
-        workers = [{
+        knownWorkers.set('default', {
           name: 'default',
           hashrate,
           lastShare: lastHashSec,
           totalHashes: Number(stats.totalHashes || 0),
-        }]
+        })
       }
 
+      // Update hashrates for all registered workers based on recency
+      for (const [, w] of knownWorkers.entries()) {
+        const isRecent = w.lastShare > 0 && (nowSec - w.lastShare) < 600
+        if (!isRecent) {
+          w.hashrate = 0
+        }
+      }
+
+      workers = Array.from(knownWorkers.values())
       workerStats = workers.map((w) => ({
         identifier: w.name,
         cumulativeAtomic: '0',
@@ -724,6 +742,7 @@ app.put('/api/settings', async (request, response) => {
       return response.status(400).json({ error: 'Enter a valid IANA time zone, such as Europe/London' })
     }
     const reset = await store.saveSettings({ address, timeZone })
+    if (reset) knownWorkers.clear()
     state.lastError = null
     await pollPool()
     response.json({ ok: true, reset })

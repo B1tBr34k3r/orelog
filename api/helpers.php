@@ -214,18 +214,37 @@ function doPoll(PDO $db): array {
         $chartMap = json_decode($cBody, true) ?: [];
     }
 
-    $activeWorkers = [];
+    // Read previous known workers
+    $prevWorkersJson = $db->query("SELECT active_workers FROM poll_state WHERE id = 1")->fetchColumn();
+    $knownWorkers = [];
+    if ($prevWorkersJson) {
+        $decoded = json_decode($prevWorkersJson, true);
+        if (is_array($decoded)) {
+            foreach ($decoded as $w) {
+                if (isset($w['name'])) $knownWorkers[$w['name']] = $w;
+            }
+        }
+    }
+
     $nowTs = time();
     if ($wBody) {
         $workers = json_decode($wBody, true);
         if (is_array($workers)) {
             $isAssoc = array_keys($workers) !== range(0, count($workers) - 1);
-            $count = count($workers);
+            $hasNamed = false;
+            foreach ($workers as $k => $w) {
+                $raw = (string)($w['identifer'] ?? $w['identifier'] ?? $w['name'] ?? $w['id'] ?? $k ?? '');
+                if ($raw !== '' && $raw !== 'global') { $hasNamed = true; break; }
+            }
+
             $idx = 0;
             foreach ($workers as $key => $w) {
                 if (!is_array($w)) continue;
                 $rawName = (string)($w['identifer'] ?? $w['identifier'] ?? $w['name'] ?? $w['id'] ?? ($isAssoc ? $key : 'worker-' . ($idx + 1)));
-                $name = ($rawName === 'global' && $count === 1) ? 'default' : $rawName;
+                $name = ($rawName === 'global' && !$hasNamed && count($knownWorkers) <= 1) ? 'default' : $rawName;
+                if ($name === 'global' && !empty($knownWorkers) && !isset($knownWorkers['global'])) {
+                    continue;
+                }
                 
                 $lastShare = (int)($w['lts'] ?? $w['lastShare'] ?? $w['last_share'] ?? $w['lastHash'] ?? $lastHash);
                 $totalH = (int)($w['totalHash'] ?? $w['totalHashes'] ?? $w['hashes'] ?? $totalHash);
@@ -233,38 +252,49 @@ function doPoll(PDO $db): array {
 
                 $chartPoints = $chartMap[$key] ?? $chartMap[$rawName] ?? [];
                 $latestPoint = (is_array($chartPoints) && !empty($chartPoints)) ? $chartPoints[0] : null;
-                $pointAge = isset($latestPoint['ts']) ? (int)(($nowTs * 1000 - $latestPoint['ts']) / 1000) : 999999;
-                $latestChartHs = ($latestPoint && $pointAge < 600) ? (float)($latestPoint['hs'] ?? 0) : 0;
+                $latestChartHs = $latestPoint ? (float)($latestPoint['hs'] ?? 0) : 0;
                 $instantHs = (float)($w['hashrate'] ?? $w['hash'] ?? $w['hash2'] ?? 0);
-                $hashrate = $isRecent ? ($instantHs > 0 ? $instantHs : $latestChartHs) : 0;
+                $hashrate = $isRecent ? ($instantHs > 0 ? instantHs : $latestChartHs) : 0;
 
-                $activeWorkers[] = [
+                $prevLast = $knownWorkers[$name]['lastShare'] ?? 0;
+                $prevTot = $knownWorkers[$name]['totalHashes'] ?? 0;
+
+                $knownWorkers[$name] = [
                     'name'        => $name,
                     'hashrate'    => $hashrate,
-                    'lastShare'   => $lastShare,
-                    'totalHashes' => $totalH,
+                    'lastShare'   => $lastShare > 0 ? $lastShare : $prevLast,
+                    'totalHashes' => $totalH > 0 ? $totalH : $prevTot,
                 ];
                 $idx++;
             }
         }
     }
 
-    if (empty($activeWorkers) && ($lastHash > 0 || (int)$totalHash > 0)) {
+    if (empty($knownWorkers) && ($lastHash > 0 || (int)$totalHash > 0)) {
         $isRecent = $lastHash > 0 && ($nowTs - $lastHash) < 600;
         $globalChart = $chartMap['global'] ?? [];
         $latestPoint = (is_array($globalChart) && !empty($globalChart)) ? $globalChart[0] : null;
-        $pointAge = isset($latestPoint['ts']) ? (int)(($nowTs * 1000 - $latestPoint['ts']) / 1000) : 999999;
-        $latestChartHs = ($latestPoint && $pointAge < 600) ? (float)($latestPoint['hs'] ?? 0) : 0;
+        $latestChartHs = $latestPoint ? (float)($latestPoint['hs'] ?? 0) : 0;
         $instantHs = (float)($stats['hash'] ?? 0);
-        $hashrate = $isRecent ? ($instantHs > 0 ? $instantHs : $latestChartHs) : 0;
+        $hashrate = $isRecent ? ($instantHs > 0 ? instantHs : $latestChartHs) : 0;
 
-        $activeWorkers[] = [
+        $knownWorkers['default'] = [
             'name'        => 'default',
             'hashrate'    => $hashrate,
             'lastShare'   => $lastHash,
             'totalHashes' => (int)$totalHash,
         ];
     }
+
+    foreach ($knownWorkers as &$w) {
+        $isRecent = ($w['lastShare'] ?? 0) > 0 && ($nowTs - $w['lastShare']) < 600;
+        if (!$isRecent) {
+            $w['hashrate'] = 0;
+        }
+    }
+    unset($w);
+
+    $activeWorkers = array_values($knownWorkers);
 
     // ── Daily allocation ──
     $prevStmt = $db->prepare(
