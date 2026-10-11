@@ -37,6 +37,43 @@ class JsonlStore {
     
     await this.loadJsonl('snapshots.jsonl', this.memory.snapshots)
     await this.loadJsonl('worker_snapshots.jsonl', this.memory.workerSnapshots)
+
+    // Ensure all monitored days from snapshots exist in memory.days
+    if (this.memory.snapshots.length > 0 && this.memory.settings?.timeZone) {
+      const tz = this.memory.settings.timeZone
+      const countsByDay = new Map()
+      const firstByDay = new Map()
+      const lastByDay = new Map()
+      for (const s of this.memory.snapshots) {
+        const dKey = timeZoneDayKey(Date.parse(s.recordedAt), tz)
+        countsByDay.set(dKey, (countsByDay.get(dKey) || 0) + 1)
+        if (!firstByDay.has(dKey)) firstByDay.set(dKey, s.recordedAt)
+        lastByDay.set(dKey, s.recordedAt)
+      }
+      const dayMap = new Map(this.memory.days.map((d) => [d.dayKey, d]))
+      const todayKey = timeZoneDayKey(Date.now(), tz)
+      let added = false
+      for (const [dKey, count] of countsByDay.entries()) {
+        if (!dayMap.has(dKey)) {
+          const newDay = {
+            dayKey: dKey,
+            earnedAtomic: '0',
+            sampleCount: count,
+            gapCount: 0,
+            firstAt: firstByDay.get(dKey) || null,
+            lastAt: lastByDay.get(dKey) || null,
+            finalized: dKey < todayKey,
+          }
+          this.memory.days.push(newDay)
+          dayMap.set(dKey, newDay)
+          added = true
+        }
+      }
+      if (added) {
+        this.memory.days.sort((a, b) => a.dayKey.localeCompare(b.dayKey))
+        await this.saveDays()
+      }
+    }
   }
 
   async loadJsonl(filename, array) {
@@ -142,9 +179,21 @@ class JsonlStore {
   }
 
   async initializeDay(dayKey, recordedAt) {
-    if (!this.memory.days.some(d => d.dayKey === dayKey)) {
-      this.memory.days.push({ dayKey, earnedAtomic: '0', sampleCount: 0, gapCount: 0, firstAt: recordedAt, lastAt: recordedAt })
+    let day = this.memory.days.find((d) => d.dayKey === dayKey)
+    if (!day) {
+      this.memory.days.push({
+        dayKey,
+        earnedAtomic: '0',
+        sampleCount: 1,
+        gapCount: 0,
+        firstAt: recordedAt,
+        lastAt: recordedAt,
+        finalized: false,
+      })
       await this.saveDays()
+    } else {
+      day.sampleCount = (day.sampleCount || 0) + 1
+      day.lastAt = recordedAt
     }
   }
 
@@ -687,9 +736,10 @@ async function pollPool() {
     const previous = await store.latestSnapshot()
     await store.insertSnapshot(snapshot)
     if (workerStats.length) await store.insertWorkerSnapshot(recordedAt, workerStats)
+    const todayKey = timeZoneDayKey(Date.now(), settings.timeZone)
+    await store.initializeDay(todayKey, recordedAt)
     if (previous) await allocateDelta(previous, snapshot, settings)
-    else await store.initializeDay(timeZoneDayKey(Date.now(), settings.timeZone), recordedAt)
-    await store.finalizeBefore(timeZoneDayKey(Date.now(), settings.timeZone))
+    await store.finalizeBefore(todayKey)
     state.lastPollAt = recordedAt
     state.lastError = null
   } catch (error) {
