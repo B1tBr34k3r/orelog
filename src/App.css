@@ -236,6 +236,9 @@ input[type="datetime-local"] { color-scheme: dark; }
   .setup-content { padding: 55px 0; }
   .setup-content h1 { font-size: 51px; }
   .setup-copy { font-size: 13px; }
+  .ledger-heading-actions { width: 100%; justify-content: space-between; }
+  .month-select-wrap { flex: 1; }
+  .month-dropdown { width: 100%; }
   .setup-footer { gap: 10px; font-size: 8px; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -260,3 +263,69 @@ input[type="datetime-local"] { color-scheme: dark; }
 .icon-action-button:hover { color: var(--bright); border-color: #68745e; background: #1c241c; }
 .icon-action-button.action-danger:hover { color: #ff6b6b; border-color: #933; background: #2c1414; }
 
+.ledger-heading-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.month-select-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: #101410;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--dim);
+}
+.month-select-wrap svg {
+  color: var(--acid);
+  flex-shrink: 0;
+}
+.month-dropdown {
+  background: transparent;
+  border: none;
+  color: var(--bright);
+  font: 500 10px/1 var(--mono);
+  outline: none;
+  cursor: pointer;
+  padding-right: 4px;
+}
+.month-dropdown option {
+  background: #101410;
+  color: var(--bright);
+}
+.month-dropdown:focus {
+  color: var(--acid);
+}
+
+.month-jump-btn {
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--acid);
+  font: 500 9px/1 var(--mono);
+  cursor: pointer;
+  border-radius: 2px;
+  transition: all 120ms ease;
+  white-space: nowrap;
+}
+.month-jump-btn:hover {
+  background: rgba(183, 255, 91, 0.08);
+  border-color: #414b3a;
+}
+
+/* Recharts Brush Range Slider Styling */
+.recharts-brush > rect:first-child {
+  fill: #101410 !important;
+  stroke: #252d24 !important;
+}
+.recharts-brush-slide {
+  fill: rgba(183, 255, 91, 0.12) !important;
+  stroke: #414d3b !important;
+}
+.recharts-brush-traveller rect {
+  fill: #1a2219 !important;
+  stroke: #5a6b52 !important;
+}
+.recharts-brush-texts text {
+  fill: #7d8c76 !important;
+  font-family: var(--mono);
+  font-size: 9px;
+}

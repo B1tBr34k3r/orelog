@@ -1,4 +1,4 @@
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Bar, BarChart, Brush, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
 type DayItem = {
   dayKey: string
@@ -50,9 +50,9 @@ function DailyTooltip({
 }
 
 export default function DailyBarChart({ days, fiat, fiatPref }: Props) {
-  const data: DayItem[] = days
-    .slice(0, 14)
-    .reverse()
+  // Chronological order (oldest to newest)
+  const data: DayItem[] = [...days]
+    .sort((a, b) => a.dayKey.localeCompare(b.dayKey))
     .map((d) => ({
       dayKey: d.dayKey.slice(5),
       fullDay: d.dayKey,
@@ -62,10 +62,14 @@ export default function DailyBarChart({ days, fiat, fiatPref }: Props) {
 
   if (!data.length) return null
 
+  const showBrush = data.length > 7
+  const defaultWindow = 14
+  const startIndex = Math.max(0, data.length - defaultWindow)
+
   return (
-    <div style={{ width: '100%', height: 160, marginBottom: '1.25rem' }}>
+    <div style={{ width: '100%', height: showBrush ? 198 : 160, marginBottom: '1.25rem' }}>
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: showBrush ? 4 : 0 }}>
           <CartesianGrid vertical={false} stroke="#29302c" strokeDasharray="2 5" />
           <XAxis
             dataKey="dayKey"
@@ -85,6 +89,18 @@ export default function DailyBarChart({ days, fiat, fiatPref }: Props) {
           />
           <Tooltip content={<DailyTooltip fiat={fiat} fiatPref={fiatPref} />} />
           <Bar dataKey="earned" fill="#b7ff5b" radius={[3, 3, 0, 0]} maxBarSize={32} />
+          {showBrush && (
+            <Brush
+              key={`${data[0]?.fullDay}-${data[data.length - 1]?.fullDay}-${data.length}`}
+              dataKey="dayKey"
+              height={24}
+              stroke="#434e3f"
+              fill="#101410"
+              startIndex={startIndex}
+              endIndex={data.length - 1}
+              travellerWidth={10}
+            />
+          )}
         </BarChart>
       </ResponsiveContainer>
     </div>

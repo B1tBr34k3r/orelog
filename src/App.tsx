@@ -223,6 +223,7 @@ function App() {
   const [customTo, setCustomTo] = useState(() => localInput(appStartedAt))
   const [fiatPref, setFiatPref] = useState<FiatPref>(() => (localStorage.getItem('orelog_fiat_pref') as FiatPref) || 'both')
   const [historyView, setHistoryView] = useState<'daily' | 'monthly'>('daily')
+  const [selectedMonth, setSelectedMonth] = useState<string>('all')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [addressInput, setAddressInput] = useState('')
   const [timeZoneInput, setTimeZoneInput] = useState(defaultTimeZone)
@@ -403,6 +404,12 @@ function App() {
 
     return result.sort((a, b) => b.monthKey.localeCompare(a.monthKey))
   }, [data?.days, currentMonthKey])
+
+  const filteredDays = useMemo(() => {
+    if (!data?.days?.length) return []
+    if (selectedMonth === 'all') return data.days
+    return data.days.filter((d) => d.dayKey.startsWith(selectedMonth))
+  }, [data?.days, selectedMonth])
 
   const hourlyRate = windowRange.to > windowRange.from
     ? Number(intervalEarned) / Number(atomicScale) / ((windowRange.to - windowRange.from) / 3_600_000)
@@ -709,39 +716,59 @@ function App() {
                 <p className="eyebrow">HISTORICAL LEDGER <span>·</span> {timeZone}</p>
                 <h2>{historyView === 'daily' ? 'Daily earnings' : 'Monthly earnings'}</h2>
               </div>
-              <div className="view-toggle-group" role="tablist" aria-label="Ledger view">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={historyView === 'daily'}
-                  className={`view-toggle-btn ${historyView === 'daily' ? 'active' : ''}`}
-                  onClick={() => setHistoryView('daily')}
-                >
-                  Daily
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={historyView === 'monthly'}
-                  className={`view-toggle-btn ${historyView === 'monthly' ? 'active' : ''}`}
-                  onClick={() => setHistoryView('monthly')}
-                >
-                  Monthly
-                </button>
+              <div className="ledger-heading-actions">
+                {historyView === 'daily' && monthlyRecords.length > 0 && (
+                  <div className="month-select-wrap">
+                    <CalendarRange size={13} />
+                    <select
+                      value={selectedMonth}
+                      onChange={(e) => setSelectedMonth(e.target.value)}
+                      className="month-dropdown"
+                      aria-label="Filter ledger month"
+                    >
+                      <option value="all">ALL MONTHS ({data?.days?.length || 0}D)</option>
+                      {monthlyRecords.map((m) => (
+                        <option key={m.monthKey} value={m.monthKey}>
+                          {m.fullMonth.toUpperCase()} ({m.daysCount}D)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <div className="view-toggle-group" role="tablist" aria-label="Ledger view">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={historyView === 'daily'}
+                    className={`view-toggle-btn ${historyView === 'daily' ? 'active' : ''}`}
+                    onClick={() => setHistoryView('daily')}
+                  >
+                    Daily
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={historyView === 'monthly'}
+                    className={`view-toggle-btn ${historyView === 'monthly' ? 'active' : ''}`}
+                    onClick={() => setHistoryView('monthly')}
+                  >
+                    Monthly
+                  </button>
+                </div>
               </div>
             </div>
 
             {historyView === 'daily' ? (
               <>
-                {data?.days && data.days.length > 0 && (
+                {filteredDays.length > 0 && (
                   <Suspense fallback={null}>
-                    <DailyBarChart days={data.days} fiat={data?.fiat} fiatPref={fiatPref} />
+                    <DailyBarChart days={filteredDays} fiat={data?.fiat} fiatPref={fiatPref} />
                   </Suspense>
                 )}
                 <div className="daily-table-wrap">
                   <table className="daily-table">
                     <thead><tr><th>DAY</th><th>EARNED</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
-                    <tbody>{(data?.days || []).slice(0, 14).map((day) => <tr key={day.dayKey}>
+                    <tbody>{filteredDays.map((day) => <tr key={day.dayKey}>
                       <td><span className="day-date">{day.dayKey}</span><small>{day.sampleCount.toLocaleString()} samples</small></td>
                       <td className="daily-amount">
                         <div>{formatXmr(day.earnedAtomic)} <small>XMR</small></div>
@@ -760,7 +787,11 @@ function App() {
                       </td>
                     </tr>)}</tbody>
                   </table>
-                  {!data?.days.length && <div className="table-empty">The daily log begins with your first pool snapshot.</div>}
+                  {!filteredDays.length && (
+                    <div className="table-empty">
+                      {selectedMonth !== 'all' ? `No daily records found for ${selectedMonth}.` : 'The daily log begins with your first pool snapshot.'}
+                    </div>
+                  )}
                 </div>
                 <p className="table-note"><ShieldCheck size={14} /> Daily totals are based on pool balance changes recorded during active monitoring.</p>
               </>
@@ -773,7 +804,7 @@ function App() {
                 )}
                 <div className="daily-table-wrap">
                   <table className="daily-table">
-                    <thead><tr><th>MONTH</th><th>TOTAL EARNED</th><th>DAILY AVG</th><th>DAYS MONITORED</th></tr></thead>
+                    <thead><tr><th>MONTH</th><th>TOTAL EARNED</th><th>DAILY AVG</th><th>DAYS MONITORED</th><th>ACTIONS</th></tr></thead>
                     <tbody>{monthlyRecords.map((m) => {
                       const avgDailyAtomic = m.daysCount > 0 ? (BigInt(m.earnedAtomic) / BigInt(m.daysCount)).toString() : '0'
                       return (
@@ -803,6 +834,19 @@ function App() {
                               <span />
                               {m.isCurrent ? `${m.daysCount}d (In progress)` : `${m.daysCount} days recorded`}
                             </span>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="month-jump-btn"
+                              title={`View daily records for ${m.fullMonth}`}
+                              onClick={() => {
+                                setSelectedMonth(m.monthKey)
+                                setHistoryView('daily')
+                              }}
+                            >
+                              Daily log →
+                            </button>
                           </td>
                         </tr>
                       )
