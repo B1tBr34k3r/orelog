@@ -454,3 +454,59 @@ input[type="datetime-local"] { color-scheme: dark; }
   transition: left 150ms ease, width 150ms ease;
 }
 
+/* Total Combined Hashrate Badges */
+.worker-header-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.total-hashrate-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #101410;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  font: 11px/1 var(--mono);
+  color: var(--dim);
+}
+
+.total-hashrate-pill svg {
+  color: var(--acid);
+}
+
+.total-hashrate-pill .pill-label {
+  font-size: 9px;
+  color: var(--dim);
+  letter-spacing: 0.04em;
+}
+
+.total-hashrate-pill strong {
+  font-size: 12px;
+  color: var(--bright);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.total-hashrate-pill.online {
+  border-color: rgba(183, 255, 91, 0.3);
+  background: rgba(183, 255, 91, 0.06);
+}
+
+.total-hashrate-pill.online strong {
+  color: var(--acid);
+  text-shadow: 0 0 10px rgba(183, 255, 91, 0.35);
+}
+
+.total-hashrate-pill.online svg {
+  animation: breathe 2s ease-in-out infinite;
+}
+
+.pulse-hashrate-live {
+  color: var(--acid) !important;
+  text-shadow: 0 0 8px rgba(183, 255, 91, 0.3);
+}
+

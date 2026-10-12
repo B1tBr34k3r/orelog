@@ -32,6 +32,7 @@ type Snapshot = {
   paidAtomic: string
   totalHashes: string
   lastHashSeconds: number
+  hashrate?: number
 }
 
 type ActiveWorker = {
@@ -70,9 +71,10 @@ type DashboardData = {
   latest: Snapshot | null
   snapshots: Snapshot[]
   workers?: ActiveWorker[]
+  totalHashrate?: number
   days: DailyRecord[]
   fiat?: FiatRates | null
-  collector: { lastPollAt: string | null; lastError: string | null; isPolling: boolean }
+  collector: { lastPollAt: string | null; lastError: string | null; isPolling: boolean; totalHashrate?: number }
   serverTime: string
 }
 
@@ -424,6 +426,16 @@ function App() {
     }).length
   }, [activeWorkers, clock])
 
+  const totalCombinedHashrate = useMemo(() => {
+    const sumWorkers = activeWorkers.reduce((acc, worker) => {
+      const workerAge = worker.lastShare > 0 ? Math.max(0, Math.floor(clock / 1000) - worker.lastShare) : null
+      const isOnline = (workerAge !== null && workerAge < 600) || worker.hashrate > 0
+      return acc + (isOnline ? (worker.hashrate || 0) : 0)
+    }, 0)
+    const poolGlobal = Number(data?.totalHashrate ?? data?.collector?.totalHashrate ?? data?.latest?.hashrate ?? 0)
+    return Math.max(sumWorkers, poolGlobal)
+  }, [activeWorkers, clock, data?.totalHashrate, data?.collector?.totalHashrate, data?.latest?.hashrate])
+
   const chartData = useMemo(() => {
     const samples = data?.snapshots || []
     const baseCombined = cumulativeAt(samples, windowRange.from)
@@ -563,7 +575,10 @@ function App() {
           </div>
           <div className="activity-badge">
             <span className={`activity-pip ${minerOnline ? '' : 'activity-idle'}`} />
-            <div><strong>{minerOnline ? 'Miner active' : 'No recent shares'}</strong><small>{minerAge === null ? 'Waiting for first share' : `Last share ${formatAge(minerAge)} ago`}</small></div>
+            <div>
+              <strong>{minerOnline ? `Mining @ ${formatHashrate(totalCombinedHashrate)}` : 'No recent shares'}</strong>
+              <small>{minerAge === null ? 'Waiting for first share' : `Last share ${formatAge(minerAge)} ago`}</small>
+            </div>
           </div>
         </section>
 
@@ -655,9 +670,16 @@ function App() {
               <p className="eyebrow">SUPPORTXMR POOL</p>
               <h2>Active miners</h2>
             </div>
-            <span className="timezone-tag">
-              {onlineWorkersCount > 0 ? `${onlineWorkersCount} MINING NOW` : 'NO ACTIVE WORKERS'}
-            </span>
+            <div className="worker-header-tags">
+              <span className={`total-hashrate-pill ${totalCombinedHashrate > 0 ? 'online' : 'idle'}`}>
+                <Zap size={11} />
+                <span className="pill-label">TOTAL HASHRATE</span>
+                <strong>{formatHashrate(totalCombinedHashrate)}</strong>
+              </span>
+              <span className="timezone-tag">
+                {onlineWorkersCount > 0 ? `${onlineWorkersCount} MINING NOW` : 'NO ACTIVE WORKERS'}
+              </span>
+            </div>
           </div>
           <div className="worker-grid">
             {activeWorkers.map((worker) => {
@@ -864,6 +886,7 @@ function App() {
             <div className="pulse-row"><span><span className={`status-dot ${data?.collector.lastError ? 'dot-error' : ''}`} />POOL API</span><strong>{data?.collector.lastError ? 'CHECK CONNECTION' : 'RESPONDING'}</strong></div>
             <div className="pulse-row"><span><Database size={14} />STORAGE</span><strong>{data?.latest ? 'RECORDING' : 'READY'}</strong></div>
             <div className="pulse-row"><span><Clock3 size={14} />LAST CHECK</span><strong>{latestAge === null ? '—' : `${formatAge(latestAge)} AGO`}</strong></div>
+            <div className="pulse-row"><span><Activity size={14} />TOTAL HASHRATE</span><strong className={totalCombinedHashrate > 0 ? 'pulse-hashrate-live' : ''}>{formatHashrate(totalCombinedHashrate)}</strong></div>
             <div className="pulse-row"><span><Cpu size={14} />TOTAL HASHES</span><strong>{formatNumber(Number(data?.latest?.totalHashes || 0))}</strong></div>
             {data?.fiat?.usd ? (
               <div className="pulse-row"><span><Zap size={14} />XMR PRICE</span><strong>${data.fiat.usd.toFixed(2)} · ₹{data.fiat.inr.toLocaleString('en-IN')}</strong></div>

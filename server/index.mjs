@@ -530,7 +530,7 @@ class PostgresStore {
 
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null
 const store = pool ? new PostgresStore(pool) : new JsonlStore()
-const state = { lastPollAt: null, lastError: null, isPolling: false }
+const state = { lastPollAt: null, lastError: null, isPolling: false, totalHashrate: 0 }
 const knownWorkers = new Map()
 
 function timeZoneDayKey(timestamp, timeZone) {
@@ -610,6 +610,7 @@ async function pollPool() {
     const recordedAt = new Date().toISOString()
     const pendingAtomic = toAtomic(stats.amtDue)
     const paidAtomic = toAtomic(stats.amtPaid)
+    const poolHashrate = Math.max(0, Number(stats.hash) || 0)
     const snapshot = {
       recordedAt,
       pendingAtomic,
@@ -617,6 +618,7 @@ async function pollPool() {
       cumulativeAtomic: (BigInt(pendingAtomic) + BigInt(paidAtomic)).toString(),
       totalHashes: String(Math.max(0, Number(stats.totalHashes) || 0)),
       lastHashSeconds: Math.max(0, Number(stats.lastHash) || 0),
+      hashrate: poolHashrate,
     }
     let workers = []
     let workerStats = []
@@ -732,6 +734,8 @@ async function pollPool() {
         cumulativeAtomic: '0',
       }))
     } catch (error) { console.warn('[workers] Unable to load worker stats:', error.message) }
+    const workerSum = (workers || []).reduce((sum, w) => sum + (Number(w.hashrate) || 0), 0)
+    state.totalHashrate = Math.max(poolHashrate, workerSum)
     state.workers = workers
     const previous = await store.latestSnapshot()
     await store.insertSnapshot(snapshot)
@@ -836,7 +840,7 @@ app.get('/api/data', async (request, response) => {
       workerSnapshots = downsample(workerSnapshots)
     }
 
-    response.json({ settings, latest, snapshots, workers: state.workers || [], workerSnapshots, days, fiat, collector: state, serverTime: new Date(now).toISOString() })
+    response.json({ settings, latest, snapshots, workers: state.workers || [], workerSnapshots, days, fiat, collector: state, totalHashrate: state.totalHashrate || 0, serverTime: new Date(now).toISOString() })
   } catch (error) {
     response.status(500).json({ error: error.message || 'Unable to load dashboard data' })
   }
