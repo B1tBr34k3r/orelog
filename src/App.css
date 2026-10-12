@@ -510,3 +510,51 @@ input[type="datetime-local"] { color-scheme: dark; }
   text-shadow: 0 0 8px rgba(183, 255, 91, 0.3);
 }
 
+/* Saved Wallets Selector in Settings */
+.saved-wallets-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  background: #101410;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+}
+
+.saved-wallets-title {
+  font: 500 9px/1 var(--mono);
+  color: var(--quiet);
+  letter-spacing: 0.04em;
+}
+
+.saved-wallets-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.saved-wallet-chip {
+  padding: 4px 8px;
+  background: #141914;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  font: 500 10px/1 var(--mono);
+  cursor: pointer;
+  border-radius: 2px;
+  transition: all 120ms ease;
+}
+
+.saved-wallet-chip:hover {
+  color: var(--bright);
+  border-color: #4b5843;
+}
+
+.saved-wallet-chip.selected {
+  background: #1c241c;
+  border-color: var(--acid);
+  color: var(--acid);
+  box-shadow: 0 0 8px rgba(183, 255, 91, 0.15);
+}
+
+

@@ -2,7 +2,7 @@ import express from 'express'
 import { Pool } from 'pg'
 import JSONbig from 'json-bigint'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { appendFile, copyFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -16,27 +16,82 @@ const parseJson = JSONbig({ storeAsString: true })
 const app = express()
 
 app.use(express.json({ limit: '16kb' }))
-import { appendFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import readline from 'node:readline'
 
 class JsonlStore {
   constructor() {
-    this.memory = { settings: null, snapshots: [], workerSnapshots: [], days: [] }
-    this.dir = path.join(path.dirname(dataPath), 'jsonl')
+    this.baseDir = path.join(path.dirname(dataPath), 'jsonl')
+    this.walletsDir = path.join(this.baseDir, 'wallets')
+    this.memory = { settings: null, snapshots: [], workerSnapshots: [], days: [], savedWallets: [] }
+    this.activeAddress = null
+  }
+
+  getWalletDir(address = this.activeAddress) {
+    if (!address) return this.baseDir
+    return path.join(this.walletsDir, address)
   }
 
   async init() {
-    await mkdir(this.dir, { recursive: true })
+    await mkdir(this.walletsDir, { recursive: true })
     try {
-      this.memory.settings = JSON.parse(await readFile(path.join(this.dir, 'settings.json'), 'utf8'))
+      this.memory.settings = JSON.parse(await readFile(path.join(this.baseDir, 'settings.json'), 'utf8'))
     } catch {}
+
+    this.activeAddress = this.memory.settings?.address || null
+
+    // Auto-migration: if activeAddress exists, ensure its wallet directory has its legacy data
+    if (this.activeAddress) {
+      const activeWalletDir = this.getWalletDir(this.activeAddress)
+      await mkdir(activeWalletDir, { recursive: true })
+      for (const fname of ['snapshots.jsonl', 'worker_snapshots.jsonl', 'days.json', 'known_workers.json']) {
+        const src = path.join(this.baseDir, fname)
+        const dest = path.join(activeWalletDir, fname)
+        try {
+          const srcData = await readFile(src).catch(() => null)
+          const destData = await readFile(dest).catch(() => null)
+          if (srcData && !destData) {
+            await writeFile(dest, srcData)
+          }
+        } catch {}
+      }
+    }
+
+    await this.scanSavedWallets()
+    if (this.activeAddress) {
+      await this.loadWalletData(this.activeAddress)
+    }
+  }
+
+  async scanSavedWallets() {
     try {
-      this.memory.days = JSON.parse(await readFile(path.join(this.dir, 'days.json'), 'utf8'))
+      const entries = await readdir(this.walletsDir, { withFileTypes: true })
+      this.memory.savedWallets = entries
+        .filter((e) => e.isDirectory() && /^[48][A-Za-z0-9]{94,105}$/.test(e.name))
+        .map((e) => e.name)
+    } catch {
+      this.memory.savedWallets = []
+    }
+    if (this.activeAddress && !this.memory.savedWallets.includes(this.activeAddress)) {
+      this.memory.savedWallets.unshift(this.activeAddress)
+    }
+  }
+
+  async loadWalletData(address) {
+    this.activeAddress = address
+    const dir = this.getWalletDir(address)
+    await mkdir(dir, { recursive: true })
+
+    this.memory.snapshots = []
+    this.memory.workerSnapshots = []
+    this.memory.days = []
+
+    try {
+      this.memory.days = JSON.parse(await readFile(path.join(dir, 'days.json'), 'utf8'))
     } catch {}
-    
-    await this.loadJsonl('snapshots.jsonl', this.memory.snapshots)
-    await this.loadJsonl('worker_snapshots.jsonl', this.memory.workerSnapshots)
+
+    await this.loadJsonlFromDir(dir, 'snapshots.jsonl', this.memory.snapshots)
+    await this.loadJsonlFromDir(dir, 'worker_snapshots.jsonl', this.memory.workerSnapshots)
 
     // Ensure all monitored days from snapshots exist in memory.days
     if (this.memory.snapshots.length > 0 && this.memory.settings?.timeZone) {
@@ -76,9 +131,9 @@ class JsonlStore {
     }
   }
 
-  async loadJsonl(filename, array) {
+  async loadJsonlFromDir(dir, filename, array) {
     try {
-      const stream = createReadStream(path.join(this.dir, filename))
+      const stream = createReadStream(path.join(dir, filename))
       const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
       for await (const line of rl) {
         if (line.trim()) array.push(JSON.parse(line))
@@ -92,9 +147,13 @@ class JsonlStore {
     return this.memory.settings
   }
 
+  getSavedWallets() {
+    return this.memory.savedWallets || []
+  }
+
   async getKnownWorkers() {
     try {
-      return JSON.parse(await readFile(path.join(this.dir, 'known_workers.json'), 'utf8'))
+      return JSON.parse(await readFile(path.join(this.getWalletDir(), 'known_workers.json'), 'utf8'))
     } catch {
       return []
     }
@@ -102,26 +161,29 @@ class JsonlStore {
 
   async saveKnownWorkers(workers) {
     try {
-      await writeFile(path.join(this.dir, 'known_workers.json'), JSON.stringify(workers, null, 2))
+      await writeFile(path.join(this.getWalletDir(), 'known_workers.json'), JSON.stringify(workers, null, 2))
     } catch {}
   }
 
   async saveSettings(settings) {
     const previous = this.memory.settings
-    const reset = Boolean(previous && (previous.address !== settings.address || previous.timeZone !== settings.timeZone))
-    this.memory.settings = settings
-    await writeFile(path.join(this.dir, 'settings.json'), JSON.stringify(settings))
-    
-    if (reset) {
-      this.memory.snapshots = []
-      this.memory.workerSnapshots = []
-      this.memory.days = []
-      await writeFile(path.join(this.dir, 'snapshots.jsonl'), '')
-      await writeFile(path.join(this.dir, 'worker_snapshots.jsonl'), '')
-      await writeFile(path.join(this.dir, 'days.json'), '[]')
-      await this.saveKnownWorkers([])
+    const addressChanged = Boolean(previous && previous.address !== settings.address)
+
+    // Save previous wallet's days to its isolated folder before switching
+    if (this.activeAddress) {
+      await this.saveDays()
     }
-    return reset
+
+    this.memory.settings = settings
+    await writeFile(path.join(this.baseDir, 'settings.json'), JSON.stringify(settings, null, 2))
+
+    if (addressChanged || !this.activeAddress) {
+      await this.loadWalletData(settings.address)
+      await this.scanSavedWallets()
+      return { reset: this.memory.snapshots.length === 0, isSwitch: true }
+    }
+
+    return { reset: false, isSwitch: false }
   }
 
   async latestSnapshot() {
@@ -130,7 +192,7 @@ class JsonlStore {
 
   async insertSnapshot(snapshot) {
     this.memory.snapshots.push(snapshot)
-    await appendFile(path.join(this.dir, 'snapshots.jsonl'), JSON.stringify(snapshot) + '\n')
+    await appendFile(path.join(this.getWalletDir(), 'snapshots.jsonl'), JSON.stringify(snapshot) + '\n')
   }
 
   async snapshotsBetween(from, to) {
@@ -147,7 +209,7 @@ class JsonlStore {
   async insertWorkerSnapshot(recordedAt, workers) {
     const snapshot = { recordedAt, workers }
     this.memory.workerSnapshots.push(snapshot)
-    await appendFile(path.join(this.dir, 'worker_snapshots.jsonl'), JSON.stringify(snapshot) + '\n')
+    await appendFile(path.join(this.getWalletDir(), 'worker_snapshots.jsonl'), JSON.stringify(snapshot) + '\n')
   }
 
   async workerSnapshotsBetween(from, to) {
@@ -162,17 +224,16 @@ class JsonlStore {
   }
 
   async saveDays() {
-    await writeFile(path.join(this.dir, 'days.json'), JSON.stringify(this.memory.days))
+    await writeFile(path.join(this.getWalletDir(), 'days.json'), JSON.stringify(this.memory.days))
   }
 
   async addDaySample(dayKey, amountAtomic, recordedAt, gap) {
     let day = this.memory.days.find(d => d.dayKey === dayKey)
     if (!day) {
-      day = { dayKey, earnedAtomic: '0', sampleCount: 0, gapCount: 0, firstAt: recordedAt }
+      day = { dayKey, earnedAtomic: '0', sampleCount: 0, gapCount: 0, firstAt: recordedAt, finalized: false }
       this.memory.days.push(day)
     }
     day.earnedAtomic = (BigInt(day.earnedAtomic) + BigInt(amountAtomic)).toString()
-    day.sampleCount += 1
     day.gapCount += gap ? 1 : 0
     day.lastAt = recordedAt
     await this.saveDays()
@@ -213,13 +274,14 @@ class JsonlStore {
   }
 
   async deleteData(from, to, dayKey, isAll) {
+    const dir = this.getWalletDir()
     if (isAll) {
       this.memory.snapshots = []
       this.memory.workerSnapshots = []
       this.memory.days = []
-      await writeFile(path.join(this.dir, 'snapshots.jsonl'), '')
-      await writeFile(path.join(this.dir, 'worker_snapshots.jsonl'), '')
-      await writeFile(path.join(this.dir, 'days.json'), '[]')
+      await writeFile(path.join(dir, 'snapshots.jsonl'), '')
+      await writeFile(path.join(dir, 'worker_snapshots.jsonl'), '')
+      await writeFile(path.join(dir, 'days.json'), '[]')
       return
     }
     if (from !== undefined && to !== undefined) {
@@ -231,8 +293,8 @@ class JsonlStore {
         const at = Date.parse(s.recordedAt)
         return at < from || at > to
       })
-      await writeFile(path.join(this.dir, 'snapshots.jsonl'), this.memory.snapshots.map((s) => JSON.stringify(s) + '\n').join(''))
-      await writeFile(path.join(this.dir, 'worker_snapshots.jsonl'), this.memory.workerSnapshots.map((s) => JSON.stringify(s) + '\n').join(''))
+      await writeFile(path.join(dir, 'snapshots.jsonl'), this.memory.snapshots.map((s) => JSON.stringify(s) + '\n').join(''))
+      await writeFile(path.join(dir, 'worker_snapshots.jsonl'), this.memory.workerSnapshots.map((s) => JSON.stringify(s) + '\n').join(''))
     }
     if (dayKey) {
       this.memory.days = this.memory.days.filter((d) => d.dayKey !== dayKey)
@@ -840,7 +902,19 @@ app.get('/api/data', async (request, response) => {
       workerSnapshots = downsample(workerSnapshots)
     }
 
-    response.json({ settings, latest, snapshots, workers: state.workers || [], workerSnapshots, days, fiat, collector: state, totalHashrate: state.totalHashrate || 0, serverTime: new Date(now).toISOString() })
+    response.json({
+      settings,
+      latest,
+      snapshots,
+      workers: state.workers || [],
+      workerSnapshots,
+      days,
+      fiat,
+      collector: state,
+      totalHashrate: state.totalHashrate || 0,
+      savedWallets: store.getSavedWallets ? store.getSavedWallets() : [],
+      serverTime: new Date(now).toISOString()
+    })
   } catch (error) {
     response.status(500).json({ error: error.message || 'Unable to load dashboard data' })
   }
@@ -858,11 +932,17 @@ app.put('/api/settings', async (request, response) => {
     } catch {
       return response.status(400).json({ error: 'Enter a valid IANA time zone, such as Europe/London' })
     }
-    const reset = await store.saveSettings({ address, timeZone })
-    if (reset) knownWorkers.clear()
+    const saveResult = await store.saveSettings({ address, timeZone })
+    const reset = typeof saveResult === 'object' ? saveResult.reset : Boolean(saveResult)
+    const isSwitch = typeof saveResult === 'object' ? saveResult.isSwitch : false
+    if (isSwitch || reset) {
+      knownWorkers.clear()
+      state.workers = []
+      state.totalHashrate = 0
+    }
     state.lastError = null
     await pollPool()
-    response.json({ ok: true, reset })
+    response.json({ ok: true, reset, isSwitch, savedWallets: store.getSavedWallets ? store.getSavedWallets() : [] })
   } catch (error) {
     response.status(500).json({ error: error.message || 'Unable to save settings' })
   }

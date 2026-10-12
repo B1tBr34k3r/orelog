@@ -75,6 +75,7 @@ type DashboardData = {
   days: DailyRecord[]
   fiat?: FiatRates | null
   collector: { lastPollAt: string | null; lastError: string | null; isPolling: boolean; totalHashrate?: number }
+  savedWallets?: string[]
   serverTime: string
 }
 
@@ -471,12 +472,15 @@ function App() {
     setSaving(true)
     setError('')
     try {
-      const response = await requestJson<{ reset: boolean }>('/api/settings', {
+      const response = await requestJson<{ reset: boolean; isSwitch?: boolean }>('/api/settings', {
         method: 'PUT',
         body: JSON.stringify({ address: addressInput, timeZone: timeZoneInput }),
       })
       setSettingsOpen(false)
-      setNotice(response.reset ? 'Wallet or timezone changed. A new earnings log has started.' : 'Miner connected. Logging starts from the first pool snapshot.')
+      const noticeMsg = response.isSwitch
+        ? (response.reset ? 'Switched to new wallet profile. Starting fresh earnings log.' : 'Switched wallet profile. Loaded all preserved historical records.')
+        : 'Miner settings updated.'
+      setNotice(noticeMsg)
       await refresh()
       window.setTimeout(() => setNotice(''), 7000)
     } catch (requestError) {
@@ -917,6 +921,25 @@ function App() {
             <form className="setup-form" onSubmit={saveSettings}>
               <label className="field-label" htmlFor="settings-address">Monero wallet address</label>
               <input id="settings-address" autoComplete="off" spellCheck={false} value={addressInput} onChange={(event) => setAddressInput(event.target.value)} required />
+
+              {data?.savedWallets && data.savedWallets.length > 1 && (
+                <div className="saved-wallets-picker">
+                  <span className="saved-wallets-title">SAVED WALLETS (CLICK TO SWITCH):</span>
+                  <div className="saved-wallets-chips">
+                    {data.savedWallets.map((w) => (
+                      <button
+                        key={w}
+                        type="button"
+                        className={`saved-wallet-chip ${w === addressInput ? 'selected' : ''}`}
+                        onClick={() => setAddressInput(w)}
+                        title={`Select ${w}`}
+                      >
+                        {w === data?.settings?.address ? '● ACTIVE: ' : ''}{w.slice(0, 8)}…{w.slice(-6)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <label className="field-label" htmlFor="settings-timezone">Daily log timezone</label>
               <input id="settings-timezone" value={timeZoneInput} onChange={(event) => setTimeZoneInput(event.target.value)} required />
               
