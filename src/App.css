@@ -610,4 +610,127 @@ input[type="datetime-local"] { color-scheme: dark; }
   margin-bottom: 14px;
 }
 
+/* Wallet Topbar Pill & Eyebrow Switch Trigger */
+.wallet-topbar-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: #141c14;
+  border: 1px solid var(--line);
+  color: var(--bright);
+  padding: 5px 10px;
+  border-radius: 4px;
+  font: 500 11px/1 var(--mono);
+  cursor: pointer;
+  transition: all 120ms ease;
+}
 
+.wallet-topbar-pill:hover {
+  background: #1a251a;
+  border-color: var(--acid);
+  color: var(--acid);
+}
+
+.wallet-pill-badge {
+  background: #233223;
+  color: var(--acid);
+  font: 700 9px/1 var(--mono);
+  padding: 2px 6px;
+  border-radius: 10px;
+}
+
+.wallet-switch-trigger-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #101510;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  padding: 3px 8px;
+  border-radius: 3px;
+  font: 500 10px/1 var(--mono);
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.wallet-switch-trigger-btn:hover {
+  border-color: var(--acid);
+  color: var(--acid);
+  background: #151d15;
+}
+
+/* Wallet Modal Section */
+.wallet-modal-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.wallet-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wallet-card-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: #101510;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  gap: 12px;
+}
+
+.wallet-card-item.active {
+  border-color: var(--acid);
+  background: #141d14;
+}
+
+.wallet-card-addr {
+  font: 500 11px/1.4 var(--mono);
+  color: var(--bright);
+  word-break: break-all;
+}
+
+.wallet-card-status {
+  font: 700 9px/1 var(--mono);
+  color: var(--acid);
+  white-space: nowrap;
+}
+
+.wallet-card-switch-btn {
+  background: #1e2a1e;
+  border: 1px solid var(--line);
+  color: var(--bright);
+  font: 500 11px/1 var(--mono);
+  padding: 6px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 120ms ease;
+}
+
+.wallet-card-switch-btn:hover {
+  border-color: var(--acid);
+  color: var(--acid);
+  background: #273827;
+}
+
+.wallet-new-box {
+  background: #0f140f;
+  border: 1px dashed var(--line);
+  padding: 14px;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wallet-new-title {
+  font: 600 11px/1 var(--mono);
+  color: var(--dim);
+  letter-spacing: 0.04em;
+}

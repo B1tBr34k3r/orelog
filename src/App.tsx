@@ -228,6 +228,8 @@ function App() {
   const [historyView, setHistoryView] = useState<'daily' | 'monthly'>('daily')
   const [selectedMonth, setSelectedMonth] = useState<string>('all')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [walletModalOpen, setWalletModalOpen] = useState(false)
+  const [newWalletInput, setNewWalletInput] = useState('')
   const [addressInput, setAddressInput] = useState('')
   const [timeZoneInput, setTimeZoneInput] = useState(defaultTimeZone)
   const [loading, setLoading] = useState(true)
@@ -604,6 +606,16 @@ function App() {
         ) : null}
 
         <div className="topbar-actions">
+          <button
+            type="button"
+            className="wallet-topbar-pill"
+            onClick={() => setWalletModalOpen(true)}
+            title="Switch or manage Monero wallets"
+          >
+            <Wallet size={13} />
+            <span>{data?.settings?.address ? `${data.settings.address.slice(0, 6)}…${data.settings.address.slice(-4)}` : 'Wallet'}</span>
+            <span className="wallet-pill-badge">{data?.savedWallets?.length || 1}</span>
+          </button>
           <div className={`connection-state ${data?.collector.lastError ? 'connection-error' : ''}`}>
             <span className="live-pip" />
             {data?.collector.lastError ? 'API ISSUE' : loading ? 'SYNCING' : 'COLLECTING'}
@@ -618,24 +630,14 @@ function App() {
           <div>
             <div className="eyebrow-row">
               <p className="eyebrow">MINER PERFORMANCE <span>·</span> {data?.settings?.address.slice(0, 8)}…{data?.settings?.address.slice(-6)}</p>
-              {data?.savedWallets && data.savedWallets.length > 1 && (
-                <div className="wallet-quick-switcher">
-                  <span className="switcher-label">WALLET:</span>
-                  <select
-                    className="wallet-select-dropdown"
-                    value={data.settings?.address || ''}
-                    onChange={(e) => switchWalletDirectly(e.target.value)}
-                    disabled={saving}
-                    title="Switch active wallet profile"
-                  >
-                    {data.savedWallets.map((w) => (
-                      <option key={w} value={w}>
-                        {w === data.settings?.address ? '● ' : ''}{w.slice(0, 8)}…{w.slice(-6)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
+              <button
+                type="button"
+                className="wallet-switch-trigger-btn"
+                onClick={() => setWalletModalOpen(true)}
+                title="Switch active wallet or connect another address"
+              >
+                <Wallet size={12} /> Switch Wallet
+              </button>
             </div>
             <h1>Earnings <span>monitor</span></h1>
           </div>
@@ -1077,6 +1079,85 @@ function App() {
               </div>
             </div>
           )}
+        </section>
+      </div>}
+
+      {walletModalOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setWalletModalOpen(false) }}>
+        <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="wallet-modal-title">
+          <div className="dialog-heading">
+            <div>
+              <p className="eyebrow">SAVED PROFILES & MULTI-WALLET</p>
+              <h2 id="wallet-modal-title">Switch Monero Wallet</h2>
+            </div>
+            <button className="icon-button" aria-label="Close" onClick={() => setWalletModalOpen(false)}><X size={18} /></button>
+          </div>
+
+          <div className="wallet-modal-section">
+            <p className="setup-copy" style={{ margin: 0 }}>
+              OreLog isolates all balance snapshots and daily logs per address on your Oracle server. Select any saved wallet or connect a new one.
+            </p>
+
+            <div className="wallet-card-list">
+              {(data?.savedWallets?.length ? data.savedWallets : (data?.settings?.address ? [data.settings.address] : [])).map((w) => {
+                const isActive = w === data?.settings?.address
+                return (
+                  <div key={w} className={`wallet-card-item ${isActive ? 'active' : ''}`}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, overflow: 'hidden', flex: 1 }}>
+                      <span className="wallet-card-addr">{w}</span>
+                      {isActive ? (
+                        <span className="wallet-card-status">● CURRENTLY ACTIVE</span>
+                      ) : (
+                        <span style={{ font: '500 9px/1 var(--mono)', color: 'var(--quiet)' }}>SAVED ON SERVER</span>
+                      )}
+                    </div>
+                    {!isActive && (
+                      <button
+                        type="button"
+                        className="wallet-card-switch-btn"
+                        onClick={() => {
+                          setWalletModalOpen(false)
+                          void switchWalletDirectly(w)
+                        }}
+                        disabled={saving}
+                      >
+                        Load This Wallet
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+
+            <form
+              className="wallet-new-box"
+              onSubmit={(e) => {
+                e.preventDefault()
+                if (newWalletInput.trim()) {
+                  setWalletModalOpen(false)
+                  const target = newWalletInput.trim()
+                  setNewWalletInput('')
+                  void switchWalletDirectly(target)
+                }
+              }}
+            >
+              <span className="wallet-new-title">+ CONNECT ANOTHER WALLET ADDRESS</span>
+              <input
+                autoComplete="off"
+                spellCheck={false}
+                value={newWalletInput}
+                onChange={(event) => setNewWalletInput(event.target.value)}
+                placeholder="Paste new Monero address (4... or 8...)"
+                required
+              />
+              <button className="button button-primary" type="submit" disabled={saving}>
+                {saving ? <RefreshCw className="spin" size={14} /> : <Wallet size={14} />} {saving ? 'Connecting…' : 'Connect & Switch to This Wallet'}
+              </button>
+            </form>
+
+            <div className="dialog-actions">
+              <button className="button button-quiet" type="button" onClick={() => setWalletModalOpen(false)}>Close</button>
+            </div>
+          </div>
         </section>
       </div>}
     </div>
