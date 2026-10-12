@@ -557,4 +557,57 @@ input[type="datetime-local"] { color-scheme: dark; }
   box-shadow: 0 0 8px rgba(183, 255, 91, 0.15);
 }
 
+.saved-wallet-chip.active-wallet {
+  background: #162016;
+  border-color: #3b5033;
+  color: #a4c98c;
+}
+
+.eyebrow-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.wallet-quick-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #101410;
+  border: 1px solid var(--line);
+  padding: 2px 8px;
+  border-radius: 2px;
+}
+
+.wallet-quick-switcher .switcher-label {
+  font: 600 9px/1 var(--mono);
+  color: var(--quiet);
+  letter-spacing: 0.05em;
+}
+
+.wallet-select-dropdown {
+  background: transparent;
+  color: var(--bright);
+  border: none;
+  font: 500 11px/1 var(--mono);
+  cursor: pointer;
+  outline: none;
+  padding: 1px 0;
+}
+
+.wallet-select-dropdown:hover,
+.wallet-select-dropdown:focus {
+  color: var(--acid);
+}
+
+.wallet-select-dropdown option {
+  background: #141914;
+  color: var(--bright);
+}
+
+.setup-wallets-picker {
+  margin-bottom: 14px;
+}
+
 

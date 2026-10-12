@@ -490,6 +490,30 @@ function App() {
     }
   }
 
+  const switchWalletDirectly = async (walletAddress: string) => {
+    if (walletAddress === data?.settings?.address) return
+    setSaving(true)
+    setError('')
+    try {
+      const response = await requestJson<{ reset: boolean; isSwitch?: boolean }>('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ address: walletAddress, timeZone: timeZoneInput || data?.settings?.timeZone || defaultTimeZone }),
+      })
+      setAddressInput(walletAddress)
+      setSettingsOpen(false)
+      const noticeMsg = response.isSwitch
+        ? (response.reset ? 'Switched to new wallet profile. Starting fresh earnings log.' : 'Switched wallet profile. Loaded all preserved historical records.')
+        : 'Miner settings updated.'
+      setNotice(noticeMsg)
+      await refresh()
+      window.setTimeout(() => setNotice(''), 7000)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to switch wallet.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const chooseWindow = (next: WindowChoice) => {
     setChoice(next)
     if (next === 'custom') {
@@ -529,6 +553,24 @@ function App() {
           <h1>Start your<br /><span>earnings log.</span></h1>
           <p className="setup-copy">Connect a miner address to begin measuring credited XMR. Collection starts with the first pool snapshot; prior earnings are not included in interval totals.</p>
           <form className="setup-form" onSubmit={saveSettings}>
+            {data?.savedWallets && data.savedWallets.length > 0 && (
+              <div className="saved-wallets-picker setup-wallets-picker">
+                <span className="saved-wallets-title">SAVED WALLETS (CLICK TO SELECT):</span>
+                <div className="saved-wallets-chips">
+                  {data.savedWallets.map((w) => (
+                    <button
+                      key={w}
+                      type="button"
+                      className={`saved-wallet-chip ${w === addressInput ? 'selected' : ''}`}
+                      onClick={() => setAddressInput(w)}
+                      title={`Select ${w}`}
+                    >
+                      ★ {w.slice(0, 8)}…{w.slice(-6)} (Use this address)
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <label className="field-label" htmlFor="setup-address">Monero wallet address</label>
             <input id="setup-address" autoComplete="off" spellCheck={false} value={addressInput} onChange={(event) => setAddressInput(event.target.value)} placeholder="4... or 8..." required />
             <label className="field-label" htmlFor="setup-timezone">Daily log timezone</label>
@@ -574,7 +616,27 @@ function App() {
       <main className="dashboard-main">
         <section className="page-heading">
           <div>
-            <p className="eyebrow">MINER PERFORMANCE <span>·</span> {data?.settings?.address.slice(0, 8)}…{data?.settings?.address.slice(-6)}</p>
+            <div className="eyebrow-row">
+              <p className="eyebrow">MINER PERFORMANCE <span>·</span> {data?.settings?.address.slice(0, 8)}…{data?.settings?.address.slice(-6)}</p>
+              {data?.savedWallets && data.savedWallets.length > 1 && (
+                <div className="wallet-quick-switcher">
+                  <span className="switcher-label">WALLET:</span>
+                  <select
+                    className="wallet-select-dropdown"
+                    value={data.settings?.address || ''}
+                    onChange={(e) => switchWalletDirectly(e.target.value)}
+                    disabled={saving}
+                    title="Switch active wallet profile"
+                  >
+                    {data.savedWallets.map((w) => (
+                      <option key={w} value={w}>
+                        {w === data.settings?.address ? '● ' : ''}{w.slice(0, 8)}…{w.slice(-6)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
             <h1>Earnings <span>monitor</span></h1>
           </div>
           <div className="activity-badge">
@@ -922,7 +984,7 @@ function App() {
               <label className="field-label" htmlFor="settings-address">Monero wallet address</label>
               <input id="settings-address" autoComplete="off" spellCheck={false} value={addressInput} onChange={(event) => setAddressInput(event.target.value)} required />
 
-              {data?.savedWallets && data.savedWallets.length > 1 && (
+              {data?.savedWallets && data.savedWallets.length > 0 && (
                 <div className="saved-wallets-picker">
                   <span className="saved-wallets-title">SAVED WALLETS (CLICK TO SWITCH):</span>
                   <div className="saved-wallets-chips">
@@ -930,11 +992,16 @@ function App() {
                       <button
                         key={w}
                         type="button"
-                        className={`saved-wallet-chip ${w === addressInput ? 'selected' : ''}`}
-                        onClick={() => setAddressInput(w)}
-                        title={`Select ${w}`}
+                        className={`saved-wallet-chip ${w === data?.settings?.address ? 'active-wallet' : w === addressInput ? 'selected' : ''}`}
+                        onClick={() => {
+                          setAddressInput(w)
+                          if (w !== data?.settings?.address) {
+                            switchWalletDirectly(w)
+                          }
+                        }}
+                        title={`Switch to ${w}`}
                       >
-                        {w === data?.settings?.address ? '● ACTIVE: ' : ''}{w.slice(0, 8)}…{w.slice(-6)}
+                        {w === data?.settings?.address ? '● ACTIVE: ' : '⚡ LOAD: '}{w.slice(0, 8)}…{w.slice(-6)}
                       </button>
                     ))}
                   </div>
@@ -959,7 +1026,7 @@ function App() {
                 <option value="inr">INR (₹) only</option>
               </select>
 
-              <p className="settings-warning"><AlertTriangle size={15} /> Changing the wallet or timezone clears this local earnings history and starts a new log.</p>
+              <p className="settings-warning"><ShieldCheck size={15} /> Each wallet's records are preserved separately on the server. Switching wallets seamlessly loads that wallet's history.</p>
               {error && <p className="form-error">{error}</p>}
               <div className="dialog-actions">
                 <button className="button button-quiet" type="button" onClick={() => setSettingsOpen(false)}>Cancel</button>

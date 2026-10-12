@@ -72,6 +72,16 @@ class JsonlStore {
     } catch {
       this.memory.savedWallets = []
     }
+    try {
+      const customProfiles = JSON.parse(await readFile(path.join(this.baseDir, 'profiles.json'), 'utf8'))
+      if (Array.isArray(customProfiles)) {
+        for (const addr of customProfiles) {
+          if (/^[48][A-Za-z0-9]{94,105}$/.test(addr) && !this.memory.savedWallets.includes(addr)) {
+            this.memory.savedWallets.push(addr)
+          }
+        }
+      }
+    } catch {}
     if (this.activeAddress && !this.memory.savedWallets.includes(this.activeAddress)) {
       this.memory.savedWallets.unshift(this.activeAddress)
     }
@@ -324,6 +334,36 @@ class JsonlStore {
       snapshots,
       workerSnapshots,
       days,
+    }
+  }
+
+  async pruneOldSnapshots() {
+    const cutoff = Date.now() - retentionMs
+    let prunedSnapshots = false
+    let prunedWorkers = false
+
+    if (this.memory.snapshots.length > 0) {
+      const firstAt = Date.parse(this.memory.snapshots[0].recordedAt)
+      if (firstAt < cutoff) {
+        this.memory.snapshots = this.memory.snapshots.filter((s) => Date.parse(s.recordedAt) >= cutoff)
+        prunedSnapshots = true
+      }
+    }
+
+    if (this.memory.workerSnapshots.length > 0) {
+      const firstAt = Date.parse(this.memory.workerSnapshots[0].recordedAt)
+      if (firstAt < cutoff) {
+        this.memory.workerSnapshots = this.memory.workerSnapshots.filter((s) => Date.parse(s.recordedAt) >= cutoff)
+        prunedWorkers = true
+      }
+    }
+
+    const dir = this.getWalletDir()
+    if (prunedSnapshots) {
+      await writeFile(path.join(dir, 'snapshots.jsonl'), this.memory.snapshots.map((s) => JSON.stringify(s) + '\n').join(''))
+    }
+    if (prunedWorkers) {
+      await writeFile(path.join(dir, 'worker_snapshots.jsonl'), this.memory.workerSnapshots.map((s) => JSON.stringify(s) + '\n').join(''))
     }
   }
 }
@@ -588,6 +628,12 @@ class PostgresStore {
       })),
     }
   }
+
+  async pruneOldSnapshots() {
+    const cutoff = new Date(Date.now() - retentionMs)
+    await this.pool.query('DELETE FROM snapshots WHERE recorded_at < $1', [cutoff])
+    await this.pool.query('DELETE FROM worker_snapshots WHERE recorded_at < $1', [cutoff])
+  }
 }
 
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null
@@ -806,6 +852,9 @@ async function pollPool() {
     await store.initializeDay(todayKey, recordedAt)
     if (previous) await allocateDelta(previous, snapshot, settings)
     await store.finalizeBefore(todayKey)
+    if (Math.random() < 0.05) {
+      await store.pruneOldSnapshots?.()
+    }
     state.lastPollAt = recordedAt
     state.lastError = null
   } catch (error) {
