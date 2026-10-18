@@ -21,6 +21,57 @@ type Props = {
 
 type Preset = '7d' | '14d' | '30d' | 'all'
 
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function formatDayLabel(dayKey: string): string {
+  const parts = dayKey.split('-')
+  if (parts.length >= 3) {
+    const month = MONTH_NAMES[Number(parts[1]) - 1] || parts[1]
+    const day = Number(parts[2])
+    return `${day} ${month}`
+  }
+  if (parts.length === 2) {
+    const month = MONTH_NAMES[Number(parts[0]) - 1] || parts[0]
+    const day = Number(parts[1])
+    return `${day} ${month}`
+  }
+  return dayKey
+}
+
+function formatFullDate(fullDay: string): string {
+  const parts = fullDay.split('-')
+  if (parts.length >= 3) {
+    const month = MONTH_NAMES[Number(parts[1]) - 1] || parts[1]
+    const day = Number(parts[2])
+    const year = parts[0]
+    return `${day} ${month} ${year}`
+  }
+  return fullDay
+}
+
+function CustomXAxisTick({ x = 0, y = 0, payload, visibleCount }: any) {
+  if (!payload || typeof payload.value !== 'string') return null
+  const label = formatDayLabel(payload.value)
+  const isRotated = visibleCount > 6
+
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <text
+        x={0}
+        y={0}
+        dy={isRotated ? 10 : 13}
+        textAnchor={isRotated ? 'end' : 'middle'}
+        fill="#838d80"
+        fontSize={10}
+        fontFamily="DM Mono, monospace"
+        transform={isRotated ? 'rotate(-35)' : undefined}
+      >
+        {label}
+      </text>
+    </g>
+  )
+}
+
 function DailyTooltip({
   active,
   payload,
@@ -45,9 +96,11 @@ function DailyTooltip({
     else fiatStr = ` ≈ $${usd.toFixed(2)} · ₹${inr.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
   }
 
+  const formattedDate = formatFullDate(item.fullDay)
+
   return (
     <div className="chart-tooltip">
-      <span>{item.fullDay} {item.finalized ? '(Final)' : '(In progress)'}</span>
+      <span>{formattedDate} {item.finalized ? '(Final)' : '(In progress)'}</span>
       <strong>{Number(item.earned).toFixed(8)} XMR{fiatStr}</strong>
     </div>
   )
@@ -59,7 +112,7 @@ export default function DailyBarChart({ days, fiat, fiatPref }: Props) {
     return [...days]
       .sort((a, b) => a.dayKey.localeCompare(b.dayKey))
       .map((d) => ({
-        dayKey: d.dayKey.slice(5),
+        dayKey: d.dayKey,
         fullDay: d.dayKey,
         earned: Number(d.earnedAtomic) / 1e12,
         finalized: d.finalized,
@@ -123,9 +176,13 @@ export default function DailyBarChart({ days, fiat, fiatPref }: Props) {
     setOffset((prev) => Math.max(0, prev - step))
   }
 
-  const rangeLabel = visibleData.length > 0
-    ? `${visibleData[0].fullDay} — ${visibleData[visibleData.length - 1].fullDay}`
-    : ''
+  const rangeLabel = useMemo(() => {
+    if (!visibleData.length) return ''
+    const first = visibleData[0].fullDay
+    const last = visibleData[visibleData.length - 1].fullDay
+    if (first === last) return formatDayLabel(first)
+    return `${formatDayLabel(first)} — ${formatDayLabel(last)}`
+  }, [visibleData])
 
   return (
     <div className="daily-chart-container">
@@ -184,16 +241,18 @@ export default function DailyBarChart({ days, fiat, fiatPref }: Props) {
       </div>
 
       {/* Bar Chart */}
-      <div style={{ width: '100%', height: 165 }}>
+      <div style={{ width: '100%', height: 185 }}>
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={visibleData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+          <BarChart data={visibleData} margin={{ top: 8, right: 8, left: 14, bottom: 4 }}>
             <CartesianGrid vertical={false} stroke="#29302c" strokeDasharray="2 5" />
             <XAxis
               dataKey="dayKey"
               stroke="#747b73"
               tickLine={false}
               axisLine={false}
-              tick={{ fontSize: 11, fontFamily: 'DM Mono' }}
+              interval={visibleData.length > 20 ? 2 : visibleData.length > 14 ? 1 : 0}
+              height={visibleData.length > 6 ? 38 : 24}
+              tick={<CustomXAxisTick visibleCount={visibleData.length} />}
             />
             <YAxis
               orientation="right"

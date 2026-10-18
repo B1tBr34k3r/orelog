@@ -58,7 +58,7 @@ export default function MonthlyBarChart({ months, fiat, fiatPref }: Props) {
   return (
     <div style={{ width: '100%', height: 165, marginBottom: '1.25rem' }}>
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <BarChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
           <CartesianGrid vertical={false} stroke="#29302c" strokeDasharray="2 5" />
           <XAxis
             dataKey="label"
